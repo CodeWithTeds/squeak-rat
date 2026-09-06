@@ -1,0 +1,6 @@
+/vendor
+/.rat.last.json
+/.rat.baseline.json
+/storage/rat/last.json
+/.rat/
+*.log

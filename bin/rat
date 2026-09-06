@@ -1,0 +1,758 @@
+#!/usr/bin/env php
+<?php
+
+// RAT standalone CLI — works without Laravel
+// Supports: rat, rat:scan, rat:show, rat:why, rat:flow, rat:impact, rat:baseline, rat:ui
+
+$autoloadCandidates = [
+    __DIR__ . '/../vendor/autoload.php',
+    __DIR__ . '/../../vendor/autoload.php',
+    __DIR__ . '/../../../vendor/autoload.php',
+    getcwd() . '/vendor/autoload.php',
+];
+
+$loaded = false;
+foreach ($autoloadCandidates as $c) {
+    if (file_exists($c)) {
+        require $c;
+        $loaded = true;
+        break;
+    }
+}
+
+if (! $loaded) {
+    fwrite(STDERR, "RAT: vendor/autoload.php not found. Run `composer install` inside the RAT package or your Laravel app.\n");
+    exit(1);
+}
+
+use Symfony\Component\Console\Application;
+use Symfony\Component\Console\Input\InputArgument;
+use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Console\Command\Command;
+use Rat\Support\RatBanner;
+use Rat\Engine\Analyzer;
+use Rat\Engine\Reporters\JsonReporter;
+use Rat\Engine\Findings\Severity;
+use Symfony\Component\Console\Helper\ProgressBar;
+use Symfony\Component\Console\Helper\Table;
+
+// ──────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────
+function rat_load_config(): array {
+    $p = getcwd() . '/config/rat.php';
+    if (file_exists($p)) {
+        try { $c = require $p; if (is_array($c)) return $c; } catch (Throwable $e) {}
+    }
+    return ['fail_on'=>'high','paths'=>['app','routes','config','database','resources','Modules','src','packages','domain','tests'],'exclude'=>['vendor','storage','bootstrap/cache','node_modules','public','.git','.idea','.vscode'],'analysis'=>['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true],'baseline'=>getcwd().'/.rat.baseline.json'];
+}
+function rat_load_last_scan(): ?array {
+    $candidates=[getcwd().'/storage/rat/last.json', getcwd().'/.rat.last.json', getcwd().'/.rat/last.json'];
+    foreach($candidates as $p) if(file_exists($p)){ $d=json_decode((string)file_get_contents($p), true); if(is_array($d)&&isset($d['findings'])) return $d; }
+    return null;
+}
+function rat_persist(array $findings, array $stats, $graph): void {
+    $payload=['generated_at'=>date('c'),'stats'=>$stats,'findings'=>array_map(fn($f)=>$f->toArray(), $findings),'graph'=>$graph->toArray()];
+    $dir=getcwd().'/storage/rat'; if(!is_dir($dir)) @mkdir($dir,0755,true);
+    @file_put_contents($dir.'/last.json', json_encode($payload, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    @file_put_contents(getcwd().'/.rat.last.json', json_encode($payload, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+    if(is_dir(getcwd().'/.rat')) @file_put_contents(getcwd().'/.rat/last.json', json_encode($payload, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+}
+function rat_hydrate_graph(array $data): \Rat\Engine\Graph\ApplicationGraph {
+    $g=new \Rat\Engine\Graph\ApplicationGraph();
+    foreach($data['nodes']??[] as $n) $g->addNode(new \Rat\Engine\Graph\Node($n['id'],$n['type'],$n['name'],$n['file']??'', $n['line']??0, $n['meta']??[]));
+    foreach($data['edges']??[] as $e) $g->addEdge(new \Rat\Engine\Graph\Edge($e['from'],$e['to'],$e['kind'],$e['label']??'', $e['meta']??[]));
+    return $g;
+}
+function rat_find_best_node($graph, string $target): ?\Rat\Engine\Graph\Node {
+    $target = trim($target);
+    $base = basename($target, '.php');
+    // Direct id match (e.g. model:User)
+    if (str_contains($target, ':')) {
+        $n = $graph->getNode(strtolower($target));
+        if ($n) return $n;
+        // try case-sensitive id
+        foreach($graph->nodes() as $node) if ($node->id === $target) return $node;
+    }
+    // Exact name match (case-insensitive) — prefer Model/Service/Controller over Route
+    $candidates = [];
+    foreach($graph->nodes() as $node){
+        if (strcasecmp($node->name, $target)===0 || strcasecmp($node->name, $base)===0) $candidates[]=$node;
+        // also check file basename
+        if ($node->file && strcasecmp(basename($node->file,'.php'), $base)===0) $candidates[]=$node;
+    }
+    if (!empty($candidates)){
+        $priority=['Model'=>0,'Service'=>1,'Controller'=>2,'Job'=>3,'Observer'=>4,'Event'=>5,'Listener'=>6,'Route'=>9,'Other'=>8];
+        usort($candidates, fn($a,$b)=> ($priority[$a->type]??7) <=> ($priority[$b->type]??7));
+        return $candidates[0];
+    }
+    // Substring but non-route first
+    $lower=strtolower($target);
+    $lowerBase=strtolower($base);
+    $candidates=[];
+    foreach($graph->nodes() as $node){
+        if (str_contains(strtolower($node->name), $lower) || str_contains(strtolower($node->name), $lowerBase)){
+            $candidates[]=$node;
+        }
+    }
+    if (!empty($candidates)){
+        // Prefer non-Route, then shorter name distance
+        usort($candidates, function($a,$b) use($target){
+            $aIsRoute=$a->type==='Route'?1:0; $bIsRoute=$b->type==='Route'?1:0;
+            if($aIsRoute!==$bIsRoute) return $aIsRoute <=> $bIsRoute;
+            return strlen($a->name) <=> strlen($b->name);
+        });
+        return $candidates[0];
+    }
+    // Fallback to file substring
+    foreach($graph->nodes() as $node){
+        if ($node->file && (str_contains(strtolower($node->file), $lower) || str_contains(strtolower($node->file), $lowerBase))) return $node;
+    }
+    return null;
+}
+
+// ──────────────────────────────────────────────────────────
+// Default command: `rat` == `rat:scan` with pretty output
+// ──────────────────────────────────────────────────────────
+class RatDefaultCommand extends Command
+{
+    public function __construct()
+    {
+        parent::__construct('rat');
+    }
+
+    protected function configure(): void
+    {
+        $this->setDescription('RAT — Laravel Security & Behavior Analyzer (default scan).');
+        $this
+            ->addOption('format', null, InputOption::VALUE_OPTIONAL, 'Output format (table|json|ndjson)', null)
+            ->addOption('json', null, InputOption::VALUE_NONE, 'Alias for --format=json')
+            ->addOption('ci', null, InputOption::VALUE_NONE, 'CI mode')
+            ->addOption('fail-on', null, InputOption::VALUE_OPTIONAL, 'Override fail_on severity')
+            ->addOption('no-image', null, InputOption::VALUE_NONE, 'Disable rat.png inline image')
+            ->addOption('compact', null, InputOption::VALUE_NONE, 'Compact banner')
+            ->addOption('all', null, InputOption::VALUE_NONE, 'Scan whole codebase (all PHP excluding vendor/storage)')
+            ->addOption('path', null, InputOption::VALUE_OPTIONAL, 'Comma-separated paths to scan (overrides config)')
+            ->addOption('security', null, InputOption::VALUE_NONE, 'Security scan — vulnerability & attack-surface analysis')
+            ->addOption('deep', null, InputOption::VALUE_NONE, 'Deep security scan — Advanced data-flow + behavior analysis');
+    }
+
+    protected function execute(InputInterface $input, OutputInterface $output): int
+    {
+        $format = $input->getOption('format') ?: ($input->getOption('json') ? 'json' : 'table');
+        $ci = (bool) $input->getOption('ci');
+        $failOn = $input->getOption('fail-on');
+        $noImage = (bool) $input->getOption('no-image');
+        $compact = (bool) $input->getOption('compact');
+        $all = (bool) $input->getOption('all');
+        $pathOpt = $input->getOption('path');
+        $security = (bool) $input->getOption('security');
+        $deep = (bool) $input->getOption('deep');
+
+        if ($noImage) { $_SERVER['RAT_NO_IMAGE']='1'; putenv('RAT_NO_IMAGE=1'); }
+
+        $isJson = in_array($format, ['json','ndjson'], true);
+
+        if (! $isJson) {
+            RatBanner::render($output, ! $noImage, $compact);
+            if ($deep) {
+                $output->writeln('  <fg=#8b5cf6;options=bold>🐀 RAT // DEEP SECURITY SCAN</>');
+                $output->writeln('  <fg=#a78bfa>Advanced data-flow + behavior analysis — whole codebase, vendor excluded</>');
+            } elseif ($security) {
+                $output->writeln('  <fg=#8b5cf6;options=bold>🐀 RAT // SECURITY SCAN</>');
+                $output->writeln('  <fg=gray>Vulnerability & attack-surface — whole codebase, vendor excluded</>');
+            }
+            $output->writeln('');
+            $output->writeln('  <fg=#8b5cf6>Scanning application...</>');
+            $output->writeln('');
+        }
+
+        $cfg = rat_load_config();
+        // Scope resolution: --deep / --security / --all / --path / interactive choice
+        if ($deep) {
+            $cfg['paths'] = ['.'];
+            $cfg['analysis'] = ['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true,'security'=>true,'deep'=>true];
+            $cfg['depth'] = 12;
+        } elseif ($security) {
+            $cfg['paths'] = ['.'];
+            $cfg['analysis'] = ['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true,'security'=>true];
+        } elseif ($all) {
+            $cfg['paths'] = ['.'];
+        } elseif ($pathOpt) {
+            $cfg['paths'] = array_values(array_filter(array_map('trim', explode(',', $pathOpt))));
+        } elseif (! $isJson && $input->isInteractive() && ! $ci && function_exists('posix_isatty') && @posix_isatty(STDIN)) {
+            $hasConfigFile = file_exists(getcwd().'/config/rat.php');
+            $helper = $this->getHelper('question');
+            $choices = ['Whole codebase (all PHP — recommended, respects exclude)', 'Laravel lot (monolith + modular monolith + microservices monorepo)', 'Security scan — Vulnerability & attack-surface analysis', 'Deep security scan — Advanced data-flow + behavior analysis'];
+            if ($hasConfigFile && ! empty($cfg['paths'])) {
+                $choices[] = 'Use config/rat.php (' . implode(', ', $cfg['paths']) . ')';
+            }
+            $choices[] = 'Custom — you type paths';
+            $q = new \Symfony\Component\Console\Question\ChoiceQuestion(
+                '  Scan scope? (vendor/storage/public/.git always excluded)',
+                $choices,
+                0
+            );
+            $q->setErrorMessage('Invalid choice %s');
+            $choice = $helper->ask($input, $output, $q);
+            if (str_starts_with($choice, 'Whole')) $cfg['paths'] = ['.'];
+            elseif (str_starts_with($choice, 'Laravel')) $cfg['paths'] = ['app','routes','config','database','resources','Modules','modules','Domain','domain','Domains','src','packages','services','Services','apps','microservices','tests'];
+            elseif (str_starts_with($choice, 'Security')) { $cfg['paths'] = ['.']; $cfg['analysis'] = ['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true,'security'=>true]; $output->writeln('  <fg=#8b5cf6;options=bold>🐀 RAT // SECURITY SCAN</>'); }
+            elseif (str_starts_with($choice, 'Deep')) { $cfg['paths'] = ['.']; $cfg['analysis'] = ['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true,'security'=>true,'deep'=>true]; $cfg['depth']=12; $output->writeln('  <fg=#8b5cf6;options=bold>🐀 RAT // DEEP SECURITY SCAN</>'); $output->writeln('  <fg=#a78bfa>Advanced data-flow + behavior analysis — displaying what they are vulnerable for</>'); }
+            elseif (str_starts_with($choice, 'Use config')) { /* keep */ }
+            else {
+                $q2 = new \Symfony\Component\Console\Question\Question('  Enter comma-separated paths (e.g. app,Modules,packages) [app,routes]: ', 'app,routes');
+                $custom = $helper->ask($input, $output, $q2);
+                $cfg['paths'] = array_values(array_filter(array_map('trim', explode(',', $custom))));
+                if (empty($cfg['paths'])) $cfg['paths'] = ['.'];
+            }
+            $output->writeln(sprintf('  <fg=gray>Scanning:</> <fg=white>%s</>', implode(', ', $cfg['paths'])));
+            $output->writeln('');
+        } else {
+            if (empty($cfg['paths'])) $cfg['paths'] = ['.'];
+        }
+
+        $analyzer = new Analyzer(getcwd(), $cfg);
+        $result = $analyzer->analyze();
+
+        $graph = $result['graph'];
+        $findings = $result['findings'];
+        $stats = $result['stats'];
+
+        if (! $isJson) {
+            // Stats — VIOLET
+            $output->writeln('  <fg=#8b5cf6>Analyzing application behavior...</>');
+            $output->writeln('');
+            $bar = new ProgressBar($output, 100);
+            $bar->setBarCharacter('<fg=#8b5cf6>█</>'); $bar->setEmptyBarCharacter('<fg=gray>░</>'); $bar->setProgressCharacter('<fg=#a78bfa>█</>');
+            $bar->setFormat('  <fg=#8b5cf6>%bar%</>  <fg=#a78bfa>%percent:3s%%</>');
+            $bar->start();
+            for($i=0;$i<=100;$i+=25){ usleep(35000); $bar->setProgress($i); }
+            $bar->finish(); $output->writeln(''); $output->writeln('');
+
+            $byType=$stats['by_type']??[]; $gStats=$stats['graph']['by_type']??[];
+            $routes=$stats['routes']??0;
+            $controllers=$byType['Controller']??($gStats['Controller']??0);
+            $models=$byType['Model']??($gStats['Model']??0);
+            $services=$byType['Service']??($gStats['Service']??0);
+            $jobs=$byType['Job']??($gStats['Job']??0);
+            $events=$byType['Event']??($gStats['Event']??0);
+            $pad=fn($label,$count)=> sprintf('  <fg=gray>%s</> %s <fg=gray>%s</>', $label, str_repeat('.', max(1,22-strlen($label))), $count);
+            $output->writeln($pad('Routes',$routes));
+            $output->writeln($pad('Controllers',$controllers));
+            $output->writeln($pad('Models',$models));
+            $output->writeln($pad('Services',$services));
+            $output->writeln($pad('Jobs',$jobs));
+            $output->writeln($pad('Events',$events));
+            $output->writeln('');
+
+            $counts=['critical'=>0,'high'=>0,'medium'=>0,'low'=>0,'info'=>0];
+            foreach($findings as $f) $counts[$f->severity->value] = ($counts[$f->severity->value]??0)+1;
+            $output->writeln('  <fg=white;options=bold>Findings</>');
+            $output->writeln('  <fg=gray>'.str_repeat('─',46).'</>');
+            $output->writeln(sprintf('  <fg=red;options=bold>%-8s</> <fg=white>%d</>', 'CRITICAL', $counts['critical']));
+            $output->writeln(sprintf('  <fg=yellow;options=bold>%-8s</> <fg=white>%d</>', 'HIGH', $counts['high']));
+            $output->writeln(sprintf('  <fg=cyan;options=bold>%-8s</> <fg=white>%d</>', 'MEDIUM', $counts['medium']));
+            $output->writeln(sprintf('  <fg=blue;options=bold>%-8s</> <fg=white>%d</>', 'LOW', $counts['low']));
+            if($counts['info']>0) $output->writeln(sprintf('  <fg=gray;options=bold>%-8s</> <fg=white>%d</>', 'INFO', $counts['info']));
+            $output->writeln('');
+            if(count($findings)>0){
+                $output->writeln('  <fg=gray>Run:</>');
+                $output->writeln('    <fg=cyan>rat show</>                 <fg=gray>— list all findings</>');
+                $output->writeln('    <fg=cyan>rat show RAT-001</>         <fg=gray>— investigate one</>');
+                $output->writeln('    <fg=cyan>rat flow "POST /api/import"</> <fg=gray>— trace a route</>');
+            } else {
+                $output->writeln('  <fg=green>✓ No findings — application looks clean (within RAT scope).</>');
+                $output->writeln('  <fg=gray>  Tip: `rat why <Controller>` and `rat impact <Model>` for exploration.</>');
+            }
+            $output->writeln('');
+            $output->writeln('  <fg=gray>Flags: --format=json | --format=ndjson | --ci | --fail-on=high | --no-image | --all | --path=app,routes</>');
+            $output->writeln('  <fg=gray>Default: whole codebase excl. vendor/storage/public/.git — use --all or choose interactively on TTY</>');
+            $output->writeln('');
+        }
+
+        if($format==='json'){
+            $rep=new JsonReporter(); $output->writeln($rep->report($findings,$stats));
+        } elseif($format==='ndjson'){
+            $rep=new JsonReporter(); $output->writeln($rep->ndjson($findings));
+        }
+
+        rat_persist($findings,$stats,$graph);
+
+        if($ci){
+            $cfg=rat_load_config();
+            $thresholdStr=$failOn ?? $cfg['fail_on'] ?? 'high';
+            if(str_contains((string)$thresholdStr,'/')) $thresholdStr=$cfg['fail_on']??'high';
+            $threshold=Severity::tryFrom(strtolower((string)$thresholdStr)) ?? Severity::HIGH;
+            $counts=['critical'=>0,'high'=>0,'medium'=>0,'low'=>0,'info'=>0];
+            foreach($findings as $f) $counts[$f->severity->value]++;
+            $output->writeln(''); $output->writeln('  <fg=white;options=bold>RAT CI CHECK</>'); $output->writeln('  <fg=gray>'.str_repeat('─',30).'</>');
+            $output->writeln(sprintf('  Critical: <fg=red>%d</>', $counts['critical']));
+            $output->writeln(sprintf('  High:     <fg=yellow>%d</>', $counts['high']));
+            $output->writeln(sprintf('  Medium:   <fg=cyan>%d</>', $counts['medium']));
+            $output->writeln('');
+            // baseline support
+            $baselinePath=$cfg['baseline']?? (getcwd().'/.rat.baseline.json');
+            if(!str_starts_with($baselinePath,'/')) $baselinePath=getcwd().'/'.ltrim($baselinePath,'/');
+            $baseline=null;
+            if(file_exists($baselinePath)) $baseline=json_decode((string)file_get_contents($baselinePath), true);
+            $newFindings=$findings;
+            if(is_array($baseline) && isset($baseline['findings'])){
+                $hashes=[]; foreach($baseline['findings'] as $bf){ $hashes[md5(($bf['title']??'').($bf['file']??'').($bf['sink']??''))]=true; }
+                $newFindings=array_filter($findings, fn($f)=> !isset($hashes[md5($f->title.$f->file.$f->sink)]));
+            }
+            $violations=array_filter($newFindings, fn($f)=> $f->severity->meetsThreshold($threshold));
+            if(count($violations)>0){
+                $output->writeln('  <fg=red;options=bold>✗ Security threshold exceeded.</>');
+                $output->writeln(sprintf('  <fg=gray>Threshold: %s | Violations: %d%s</>', strtoupper($threshold->value), count($violations), $baseline?' (new vs baseline)':'' ));
+                $output->writeln('  <fg=gray>Exit code: 1</>');
+                return 1;
+            }
+            $output->writeln('  <fg=green;options=bold>✓ CI check passed.</>');
+            $output->writeln('  <fg=gray>Exit code: 0</>');
+            return 0;
+        }
+        return 0;
+    }
+}
+
+class RatScanStandalone extends Command
+{
+    public function __construct(){ parent::__construct('scan'); }
+    protected function configure(): void {
+        $this->setDescription('Run RAT deep scan and persist results.')
+             ->addOption('format', null, InputOption::VALUE_OPTIONAL, 'table|json|ndjson','table')
+             ->addOption('ci', null, InputOption::VALUE_NONE, 'CI mode')
+             ->addOption('fail-on', null, InputOption::VALUE_OPTIONAL, 'Override fail_on')
+             ->addOption('no-image', null, InputOption::VALUE_NONE, 'Disable image')
+             ->addOption('all', null, InputOption::VALUE_NONE, 'Scan whole codebase (all PHP excluding vendor/storage)')
+             ->addOption('path', null, InputOption::VALUE_OPTIONAL, 'Comma-separated paths (overrides config)')
+             ->addOption('security', null, InputOption::VALUE_NONE, 'Security scan — vulnerability & attack-surface analysis');
+    }
+    protected function execute(InputInterface $input, OutputInterface $output): int {
+        $format=$input->getOption('format')??'table';
+        $noImage=(bool)$input->getOption('no-image');
+        if($format!=='json' && $format!=='ndjson' && !$noImage) RatBanner::render($output, true, false);
+        if($format==='table' && !$noImage) $output->writeln(' <fg=gray>RAT scan starting...</>');
+        $all=(bool)$input->getOption('all');
+        $security=(bool)$input->getOption('security');
+        $deep=(bool)$input->getOption('deep');
+        $pathOpt=$input->getOption('path');
+        $extraPaths=$pathOpt? explode(',', (string)$pathOpt): [];
+        $cfg=rat_load_config();
+        if ($deep) { $cfg['paths']=['.']; $cfg['analysis']=['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true,'security'=>true,'deep'=>true]; $cfg['depth']=12; if(! in_array($format, ['json','ndjson'], true)) { $output->writeln('  <fg=#8b5cf6;options=bold>🐀 RAT // DEEP SECURITY SCAN</>'); $output->writeln('  <fg=#a78bfa>Advanced data-flow + behavior analysis</>'); } }
+        elseif ($security) { $cfg['paths']=['.']; $cfg['analysis']=['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true,'security'=>true]; if(! in_array($format, ['json','ndjson'], true)) { $output->writeln('  <fg=#8b5cf6;options=bold>🐀 RAT // SECURITY SCAN</>'); } }
+        elseif ($all) $cfg['paths']=['.'];
+        elseif (!empty($extraPaths)) $cfg['paths']=array_values(array_filter(array_map('trim',$extraPaths)));
+        elseif (! in_array($format, ['json','ndjson'], true) && $input->isInteractive() && ! $input->getOption('ci') && function_exists('posix_isatty') && @posix_isatty(STDIN)) {
+            $hasConfigFile=file_exists(getcwd().'/config/rat.php');
+            $helper=$this->getHelper('question');
+            $choices=['Whole codebase (all PHP — recommended, respects exclude)','Laravel lot (monolith + modular monolith + microservices monorepo)','Security scan — Vulnerability & attack-surface analysis','Deep security scan — Advanced data-flow + behavior analysis'];
+            if ($hasConfigFile && ! empty($cfg['paths'])) $choices[]='Use config/rat.php ('.implode(', ',$cfg['paths']).')';
+            $choices[]='Custom — you type paths';
+            $q=new \Symfony\Component\Console\Question\ChoiceQuestion('  Scan scope? (vendor/storage/public/.git always excluded)', $choices, 0);
+            $choice=$helper->ask($input,$output,$q);
+            if (str_starts_with($choice,'Whole')) $cfg['paths']=['.'];
+            elseif (str_starts_with($choice,'Laravel')) $cfg['paths']=['app','routes','config','database','resources','Modules','modules','Domain','domain','Domains','src','packages','services','Services','apps','microservices','tests'];
+            elseif (str_starts_with($choice,'Security')) { $cfg['paths']=['.']; $cfg['analysis']=['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true,'security'=>true]; $output->writeln('  <fg=#8b5cf6;options=bold>🐀 RAT // SECURITY SCAN</>'); }
+            elseif (str_starts_with($choice,'Deep')) { $cfg['paths']=['.']; $cfg['analysis']=['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true,'security'=>true,'deep'=>true]; $cfg['depth']=12; $output->writeln('  <fg=#8b5cf6;options=bold>🐀 RAT // DEEP SECURITY SCAN</>'); $output->writeln('  <fg=#a78bfa>Advanced data-flow + behavior analysis — displaying what they are vulnerable for</>'); }
+            elseif (str_starts_with($choice,'Use config')) { /* keep */ }
+            else { $q2=new \Symfony\Component\Console\Question\Question('  Enter comma-separated paths [app,routes]: ','app,routes'); $custom=$helper->ask($input,$output,$q2); $cfg['paths']=array_values(array_filter(array_map('trim', explode(',',$custom)))); if(empty($cfg['paths'])) $cfg['paths']=['.']; }
+            $output->writeln(sprintf('  <fg=gray>Scanning:</> <fg=white>%s</>', implode(', ',$cfg['paths'])));
+        } else { if(empty($cfg['paths'])) $cfg['paths']=['.']; }
+        $analyzer=new Analyzer(getcwd(), $cfg);
+        $res=$analyzer->analyze();
+        $findings=$res['findings']; $stats=$res['stats']; $graph=$res['graph'];
+        rat_persist($findings,$stats,$graph);
+        if($format==='json'){ $rep=new JsonReporter(); $output->writeln($rep->report($findings,$stats)); return 0; }
+        if($format==='ndjson'){ $rep=new JsonReporter(); $output->writeln($rep->ndjson($findings)); return 0; }
+        $output->writeln(''); $output->writeln('  <fg=white;options=bold>Scan complete.</>');
+        $output->writeln(sprintf('  Routes: %d | Files: %d | Findings: %d', $stats['routes']??0, $stats['files']??0, count($findings)));
+        $output->writeln('');
+        $counts=['critical'=>0,'high'=>0,'medium'=>0,'low'=>0,'info'=>0]; foreach($findings as $f) $counts[$f->severity->value]++;
+        foreach(['critical','high','medium','low'] as $sev){ $color=match($sev){'critical'=>'red','high'=>'yellow','medium'=>'cyan','low'=>'blue'}; $output->writeln(sprintf('  <fg=%s>%s</> %d', $color, strtoupper($sev), $counts[$sev])); }
+        $output->writeln(''); $output->writeln('  <fg=gray>Investigate:</> <fg=cyan>rat show RAT-001</>  <fg=gray>|</> <fg=cyan>rat flow "POST /api/import"</>'); 
+        $output->writeln('  <fg=gray>Dashboard:</>  <fg=cyan>rat ui</>'); 
+        if($input->getOption('ci')){
+            $failOn=$input->getOption('fail-on')?? $cfg['fail_on']??'high';
+            $threshold=Severity::tryFrom(strtolower($failOn))??Severity::HIGH;
+            $violations=array_filter($findings, fn($f)=> $f->severity->meetsThreshold($threshold));
+            if(count($violations)>0){ $output->writeln(' <fg=red>✗ CI threshold exceeded.</>'); return 1; }
+            $output->writeln(' <fg=green>✓ CI passed.</>');
+        }
+        return 0;
+    }
+}
+
+class RatShowStandalone extends Command
+{
+    public function __construct(){ parent::__construct('show'); }
+    protected function configure(): void {
+        $this->setDescription('Show findings or investigate a specific RAT finding.')
+             ->addArgument('id', InputArgument::OPTIONAL, 'Finding ID e.g. RAT-001 or severity filter')
+             ->addOption('format', null, InputOption::VALUE_OPTIONAL, 'table|json','table')
+             ->addOption('no-image', null, InputOption::VALUE_NONE, 'Disable image');
+    }
+    protected function execute(InputInterface $input, OutputInterface $output): int {
+        $id=$input->getArgument('id');
+        $format=$input->getOption('format')??'table';
+        $noImage=(bool)$input->getOption('no-image');
+        $payload=rat_load_last_scan();
+        if(!$payload){
+            $output->writeln(' <fg=yellow>No previous scan — running quick analysis...</>');
+            $analyzer=new Analyzer(getcwd(), rat_load_config());
+            $res=$analyzer->analyze();
+            $payload=['findings'=>array_map(fn($f)=>$f->toArray(), $res['findings']), 'stats'=>$res['stats'], 'graph'=>$res['graph']->toArray()];
+        }
+        $findings=$payload['findings']??[]; $stats=$payload['stats']??[];
+        if($format==='json'){
+            if($id){
+                $needle=strtoupper((string)$id); $found=null;
+                foreach($findings as $f) if(strtoupper($f['id']??'')===$needle){ $found=$f; break; }
+                $output->writeln($found? json_encode($found, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES) : json_encode(['error'=>'not found','id'=>$id]));
+                return $found?0:1;
+            }
+            $output->writeln(json_encode(['findings'=>$findings,'stats'=>$stats], JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+            return 0;
+        }
+        if(!$id){
+            // list
+            if(!$noImage) RatBanner::render($output, true, false);
+            $output->writeln('');
+            $counts=['critical'=>0,'high'=>0,'medium'=>0,'low'=>0,'info'=>0]; foreach($findings as $f) $counts[strtolower($f['severity']??'info')]++;
+            $output->writeln(sprintf('  <fg=gray>All findings:</> <fg=white>%d</>  <fg=gray>|</> <fg=red>CRITICAL %d</> <fg=yellow>HIGH %d</> <fg=cyan>MEDIUM %d</> <fg=blue>LOW %d</>', count($findings), $counts['critical'],$counts['high'],$counts['medium'],$counts['low']));
+            $output->writeln('  <fg=gray>'.str_repeat('─',72).'</>'); $output->writeln('');
+            if(empty($findings)){ $output->writeln('  <fg=green>✓ No findings.</>'); return 0; }
+            $output->writeln('  <fg=gray>[All] [Critical] [High] [Medium] [Low]  —  try: </><fg=cyan>rat show high</>'); $output->writeln('');
+            foreach($findings as $f){
+                $sev=strtoupper($f['severity']??'INFO'); $color=match(strtolower($sev)){'critical'=>'red','high'=>'yellow','medium'=>'cyan','low'=>'blue', default=>'gray'};
+                $fid=$f['id']??'?'; $title=$f['title']??''; $entry=$f['entry']??''; $conf=strtoupper($f['confidence']??'MEDIUM'); $file=$f['file']??''; $line=$f['line']??'';
+                $output->writeln(sprintf('  <fg=%s;options=bold>%-8s</> <fg=white;options=bold>%s</>', $color,$sev,$fid));
+                $output->writeln(sprintf('  <fg=white>%s</>', $title));
+                if($entry) $output->writeln(sprintf('  <fg=gray>%s</>', $entry));
+                if($file) $output->writeln(sprintf('  <fg=gray>%s%s</>  <fg=gray>Confidence:</> <fg=white>%s</>', $file, $line?":$line":'', $conf));
+                $output->writeln(sprintf('  <fg=gray>→</> <fg=cyan>rat show %s</>', $fid)); $output->writeln('');
+            }
+            return 0;
+        }
+        $lower=strtolower((string)$id);
+        if(in_array($lower,['critical','high','medium','low','info'],true)){
+            // filter view
+            $filtered=array_values(array_filter($findings, fn($f)=> strtolower($f['severity']??'')===$lower));
+            if(!$noImage) RatBanner::render($output, true, false);
+            $output->writeln(''); $output->writeln(sprintf('  <fg=gray>Filter:</> <fg=white;options=bold>%s</>  <fg=gray>(%d findings)</>', strtoupper($lower), count($filtered)));
+            $output->writeln('  <fg=gray>'.str_repeat('─',72).'</>'); $output->writeln('');
+            if(empty($filtered)){ $output->writeln('  <fg=green>✓ No findings for this filter.</>'); return 0; }
+            foreach($filtered as $f){
+                $sev=strtoupper($f['severity']??'INFO'); $color=match(strtolower($sev)){'critical'=>'red','high'=>'yellow','medium'=>'cyan','low'=>'blue', default=>'gray'};
+                $output->writeln(sprintf('  <fg=%s;options=bold>%-8s</> <fg=white;options=bold>%s</>', $color,$sev,$f['id']??'?'));
+                $output->writeln(sprintf('  <fg=white>%s</>', $f['title']??'')); $output->writeln(sprintf('  <fg=gray>%s</>', $f['entry']??'')); $output->writeln(sprintf('  <fg=gray>→</> <fg=cyan>rat show %s</>', $f['id'])); $output->writeln('');
+            }
+            return 0;
+        }
+        // single
+        $norm=strtoupper(trim((string)$id));
+        if(preg_match('/^R0*(\d+)$/', $norm, $m)) $norm=sprintf('RAT-%03d', (int)$m[1]);
+        $found=null; foreach($findings as $f) if(strtoupper($f['id']??'')===$norm){ $found=$f; break; }
+        if(!$found) foreach($findings as $f) if(strcasecmp($f['id']??'', (string)$id)===0){ $found=$f; break; }
+        if(!$found){ $output->writeln("<error> Finding $id not found. Run `rat show` to list all.</error>"); return 1; }
+        if(!$noImage) RatBanner::render($output, true, false);
+        $sev=strtoupper($found['severity']??'INFO'); $color=match(strtolower($sev)){'critical'=>'red','high'=>'yellow','medium'=>'cyan','low'=>'blue', default=>'gray'};
+        $conf=strtoupper($found['confidence']??'HIGH');
+        $output->writeln(''); $output->writeln(sprintf('  <fg=%s;options=bold>🐀 %s</>  <fg=%s;options=bold>%s</>', $color, $found['id']??$id, $color, $sev));
+        $output->writeln(''); $output->writeln(sprintf('  <fg=white>%s</>', $found['title']??''));
+        if(!empty($found['description']) && $found['description']!==$found['title']) $output->writeln(sprintf('  <fg=gray>%s</>', $found['description']));
+        $output->writeln(''); $output->writeln('  <fg=white;options=bold>ENTRY POINT</>'); $output->writeln(sprintf('  <fg=cyan>%s</>', $found['entry']??'—'));
+        $output->writeln(''); $output->writeln('  <fg=white;options=bold>SOURCE</>'); $output->writeln(sprintf('  <fg=yellow>%s</>', $found['source']??'—'));
+        $output->writeln(''); $output->writeln('  <fg=white;options=bold>FLOW</>'); $output->writeln(''); $output->writeln('  <fg=gray>HTTP Request</>'); $output->writeln('  <fg=gray>    │</>');
+        foreach(($found['flow']??[]) as $idx=>$node){
+            $isLast=$idx===count($found['flow'])-1; $boxColor=$isLast?'red':'white';
+            $output->writeln('  <fg=gray>    ▼</>'); $output->writeln(sprintf('  <fg=%s>┌───────────────────┐</>', $boxColor)); $output->writeln(sprintf('  <fg=%s>│ %-17s │</>', $boxColor, substr($node,0,17))); $output->writeln(sprintf('  <fg=%s>└────────┬──────────┘</>', $boxColor)); if(!$isLast) $output->writeln('  <fg=gray>         │</>');
+        }
+        $output->writeln('  <fg=gray>         ▼</>'); $output->writeln('  <fg=gray>    Filesystem / Sink</>'); $output->writeln('');
+        $output->writeln('  <fg=white;options=bold>WHY RAT FLAGGED THIS</>'); $output->writeln('');
+        $why=$found['why']?? $found['description']?? '';
+        $wrapped=wordwrap($why?:'User-controlled input reaches a sensitive sink without a clearly identified security boundary.',68,"\n  ");
+        $output->writeln('  <fg=gray>'.$wrapped.'</>'); $output->writeln('');
+        $output->writeln('  <fg=white;options=bold>CONFIDENCE</>');
+        $bar=match($conf){'HIGH'=>'██████████████████░░','MEDIUM'=>'████████████░░░░░░░░','LOW'=>'██████░░░░░░░░░░░░░░', default=>'████████░░░░░░░░░░░░'};
+        $output->writeln(sprintf('  <fg=cyan>%s</>  <fg=white>%s</>', $bar,$conf)); $output->writeln('');
+        if(!empty($found['recommendations'])){
+            $output->writeln('  <fg=white;options=bold>RECOMMENDATION</>'); $output->writeln(''); $output->writeln('  <fg=gray>Review whether:</>');
+            foreach($found['recommendations'] as $r) $output->writeln(sprintf('    <fg=gray>•</> <fg=white>%s</>', $r));
+            $output->writeln('');
+        }
+        $file=$found['file']??''; $line=$found['line']??'';
+        if($file){
+            $output->writeln('  <fg=white;options=bold>LOCATION</>'); $output->writeln(sprintf('  <fg=gray>%s%s</>', $file, $line?":$line":'')); $output->writeln('');
+            $abs=getcwd().'/'.$file;
+            if(file_exists($abs)){
+                $lines=@file($abs)?:[]; $ln=max(1,(int)$line-2);
+                $output->writeln('  <fg=gray>Code:</>');
+                for($i=$ln;$i< min($ln+7, count($lines)+1); $i++){ $code=rtrim($lines[$i-1]??''); $marker=$i===(int)$line?'<fg=red>›</>':' '; $num=str_pad((string)$i,3,' ',STR_PAD_LEFT); $output->writeln(sprintf('  %s <fg=gray>%s</> %s', $marker,$num,htmlspecialchars($code))); }
+                $output->writeln('');
+            }
+        }
+        $output->writeln('  <fg=gray>Investigate further:</> <fg=cyan>rat why '. strtok($found['entry']??'', ' ') .'</>  <fg=gray>|</> <fg=cyan>rat flow "' . ($found['entry']??'') .'"</>  <fg=gray>|</> <fg=cyan>rat impact '.($file?:$found['entry']??'').'</>');
+        $output->writeln('');
+        return 0;
+    }
+}
+
+class RatWhyStandalone extends Command
+{
+    public function __construct(){ parent::__construct('why'); }
+    protected function configure(): void {
+        $this->setDescription('Explain why a class has access to something.')
+             ->addArgument('target', InputArgument::REQUIRED, 'Class/file e.g. UserController')
+             ->addOption('depth', null, InputOption::VALUE_OPTIONAL,'Depth',6)
+             ->addOption('format', null, InputOption::VALUE_OPTIONAL,'table|json','table')
+             ->addOption('no-image', null, InputOption::VALUE_NONE,'Disable image');
+    }
+    protected function execute(InputInterface $input, OutputInterface $output): int {
+        $target=(string)$input->getArgument('target'); $depth=(int)$input->getOption('depth'); $format=$input->getOption('format')??'table'; $noImage=(bool)$input->getOption('no-image');
+        $payload=rat_load_last_scan();
+        if(!$payload){
+            $output->writeln(' <fg=yellow>No prior scan — running quick analysis...</>');
+            $a=new Analyzer(getcwd(), rat_load_config()); $r=$a->analyze(); $payload=['graph'=>$r['graph']->toArray(),'findings'=>array_map(fn($f)=>$f->toArray(), $r['findings'])];
+        }
+        $graph=rat_hydrate_graph($payload['graph']??[]);
+        $node=rat_find_best_node($graph, $target) ?? $graph->findNodeByName(basename($target,'.php'));
+        if(!$node){ foreach($graph->nodes() as $n) if($n->file && str_contains($n->file, basename($target,'.php'))){ $node=$n; break; } }
+        if(!$node){ $output->writeln("<error> Target [$target] not found.</error>"); $output->writeln(' <fg=gray>Try: rat why UserController</>'); $cands=array_slice($graph->nodes(),0,20); $output->writeln(''); $output->writeln('  <fg=gray>Available (sample):</>'); foreach($cands as $n) $output->writeln(sprintf('   <fg=cyan>%s</> <fg=gray>(%s)</>', $n->name,$n->type)); return 1; }
+        if($format==='json'){
+            $out=['target'=>$node->toArray(),'outgoing'=>array_map(fn($n)=>$n->toArray(), $graph->reachableFrom($node->id,$depth)),'incoming'=>array_map(fn($n)=>$n->toArray(), $graph->ancestorsOf($node->id,$depth)),'edges_out'=>array_map(fn($e)=>$e->toArray(), $graph->outgoing($node->id)),'edges_in'=>array_map(fn($e)=>$e->toArray(), $graph->incoming($node->id))];
+            $output->writeln(json_encode($out, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)); return 0;
+        }
+        if(!$noImage) RatBanner::render($output,true,false);
+        $output->writeln(''); $output->writeln(sprintf('  <fg=white;options=bold>WHY DOES %s HAVE ACCESS?</>', strtoupper($node->name)));
+        $output->writeln(''); $output->writeln(sprintf('  <fg=gray>Target:</> <fg=white;options=bold>%s</> <fg=gray>(%s) %s</>', $node->name,$node->type,$node->file?:''));
+        $output->writeln(''); $output->writeln('  <fg=white;options=bold>DEPENDENCY TRAIL (outgoing)</>'); $output->writeln('  <fg=gray>'.str_repeat('─',40).'</>');
+        $outs=$graph->outgoing($node->id); $reach=$graph->reachableFrom($node->id,$depth);
+        if(empty($outs) && empty($reach)){ $output->writeln('  <fg=gray>No outgoing dependencies.</>'); }
+        else {
+            $flow=[$node->name]; $cur=$node->id; $vis=[$cur=>true];
+            for($d=0;$d<$depth;$d++){ $os=$graph->outgoing($cur); if(empty($os)) break; $ne=$os[0]; $nid=$ne->to; if(isset($vis[$nid])) break; $nn=$graph->getNode($nid); if(!$nn) break; $flow[]=$nn->name.' <fg=gray>('.$ne->kind.')</>'; $cur=$nid; $vis[$cur]=true; }
+            foreach($flow as $i=>$step){ $output->writeln(sprintf('  <fg=white>%s</>', $step)); if($i<count($flow)-1) $output->writeln('  <fg=gray>    ↓</>'); }
+            $output->writeln(''); $output->writeln('  <fg=gray>All outgoing:</>');
+            foreach($outs as $e){ $t=$graph->getNode($e->to); $output->writeln(sprintf('    <fg=cyan>%s</> <fg=gray>%s</> <fg=white>%s</>', $node->name,$e->kind, $t? $t->name.' ('.$t->type.')':$e->to)); }
+            if(count($reach)>count($outs)){ $output->writeln(''); $output->writeln(sprintf('  <fg=gray>Transitive (%d):</>', count($reach))); foreach(array_slice($reach,0,10) as $n) $output->writeln(sprintf('    <fg=gray>•</> <fg=white>%s</> <fg=gray>%s</>', $n->name,$n->type)); if(count($reach)>10) $output->writeln('    <fg=gray>… +'.(count($reach)-10).' more</>'); }
+        }
+        $output->writeln(''); $output->writeln('  <fg=white;options=bold>WHO DEPENDS ON THIS?</>'); $output->writeln('  <fg=gray>'.str_repeat('─',40).'</>');
+        $ins=$graph->incoming($node->id); $ancs=$graph->ancestorsOf($node->id,$depth);
+        if(empty($ins)) $output->writeln('  <fg=gray>No incoming dependents.</>'); else { foreach($ins as $e){ $f=$graph->getNode($e->from); $output->writeln(sprintf('    <fg=white>%s</> <fg=gray>%s</> <fg=cyan>%s</>', $f? $f->name.' ('.$f->type.')':$e->from, $e->kind, $node->name)); } }
+        $output->writeln(''); $output->writeln('  <fg=gray>Hidden: '.(!empty($node->meta['hidden_behavior'])?'<fg=yellow>'.implode(', ',$node->meta['hidden_behavior']).'</>':'<fg=gray>none</>').'</>'); $output->writeln('  <fg=gray>Try:</> <fg=cyan>rat impact '.$node->name.'</>');
+        return 0;
+    }
+}
+
+class RatFlowStandalone extends Command
+{
+    public function __construct(){ parent::__construct('flow'); }
+    protected function configure(): void {
+        $this->setDescription('Visualize execution flow for a route.')
+             ->addArgument('route', InputArgument::REQUIRED, 'Route e.g. "POST /api/import"')
+             ->addOption('depth', null, InputOption::VALUE_OPTIONAL,'Depth',8)
+             ->addOption('format', null, InputOption::VALUE_OPTIONAL,'table|json','table')
+             ->addOption('no-image', null, InputOption::VALUE_NONE,'Disable image');
+    }
+    protected function execute(InputInterface $input, OutputInterface $output): int {
+        $routeArg=(string)$input->getArgument('route'); $depth=(int)$input->getOption('depth'); $format=$input->getOption('format')??'table'; $noImage=(bool)$input->getOption('no-image');
+        $payload=rat_load_last_scan();
+        if(!$payload){ $output->writeln(' <fg=yellow>No prior scan — running quick analysis...</>'); $a=new Analyzer(getcwd(), rat_load_config()); $r=$a->analyze(); $payload=['graph'=>$r['graph']->toArray(),'findings'=>array_map(fn($f)=>$f->toArray(), $r['findings'])]; }
+        $graph=rat_hydrate_graph($payload['graph']??[]);
+        $findRoute=function($arg) use($graph){
+            $arg=trim($arg,'"\''); foreach($graph->nodesByType('Route') as $n) if(strcasecmp($n->name,$arg)===0) return $n;
+            $argL=strtolower($arg); $uri=$arg; if(preg_match('/^(GET|POST|PUT|PATCH|DELETE|OPTIONS)\s+(.+)$/i',$arg,$m)){ $uri=trim($m[2]); $method=strtoupper($m[1]); foreach($graph->nodesByType('Route') as $n) if(strcasecmp($n->name,$method.' '.$uri)===0) return $n; }
+            foreach($graph->nodesByType('Route') as $n) if(str_contains(strtolower($n->name), $argL) || str_contains(strtolower($n->name), strtolower($uri))) return $n; return null;
+        };
+        $routeNode=$findRoute($routeArg) ?? $graph->findNodeByName($routeArg);
+        if(!$routeNode){ $output->writeln("<error> Route [$routeArg] not found.</error>"); foreach($graph->nodesByType('Route') as $n) $output->writeln(sprintf('   <fg=cyan>%s</>', $n->name)); if(empty($graph->nodesByType('Route'))) $output->writeln('  <fg=gray>(no routes)</>'); return 1; }
+        if($format==='json'){
+            // BFS trace
+            $queue=[[$routeNode->id,0]]; $visited=[$routeNode->id=>true]; $levels=[0=>[$routeNode]]; $edges=[];
+            while(!empty($queue)){ [$cur,$d]=array_shift($queue); if($d>=$depth) continue; foreach($graph->outgoing($cur) as $e){ $edges[]=['from'=>$cur,'to'=>$e->to,'edge'=>$e->toArray()]; if(!isset($visited[$e->to])){ $visited[$e->to]=true; $node=$graph->getNode($e->to); if($node){ $levels[$d+1][]=$node; $queue[]=[$e->to,$d+1]; } } } }
+            $output->writeln(json_encode(['entry'=>$routeNode->toArray(),'trace'=>['levels'=>array_map(fn($arr)=>array_map(fn($n)=>$n->toArray(),$arr), $levels),'edges'=>$edges]], JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)); return 0;
+        }
+        if(!$noImage) RatBanner::render($output,true,false);
+        $output->writeln(''); $output->writeln('  <fg=white;options=bold>🐀 FLOW</>'); $output->writeln(''); $output->writeln(sprintf('  <fg=cyan;options=bold>%s</>', $routeNode->name)); $output->writeln('');
+        // Build BFS levels for rendering
+        $queue=[[$routeNode->id,0]]; $visited=[$routeNode->id=>true]; $levels=[0=>[$routeNode]];
+        while(!empty($queue)){ [$cur,$d]=array_shift($queue); if($d>=$depth) continue; foreach($graph->outgoing($cur) as $e){ if(!isset($visited[$e->to])){ $visited[$e->to]=true; $node=$graph->getNode($e->to); if($node){ $levels[$d+1][]=$node; $queue[]=[$e->to,$d+1]; } } } }
+        $output->writeln(sprintf('  <fg=white>┌───────────────────┐</>')); $output->writeln(sprintf('  <fg=white>│ %-17s │</> <fg=gray>Route</>', substr($routeNode->name,0,17))); $output->writeln(sprintf('  <fg=white>└────────┬──────────┘</>'));
+        ksort($levels); foreach($levels as $lvl=>$nodes){ if($lvl===0) continue; $nodes=array_unique($nodes, SORT_REGULAR); $output->writeln('  <fg=gray>         │</>'); if(count($nodes)===1){ $output->writeln('  <fg=gray>         ▼</>'); $n=$nodes[0]; $col=match($n->type){'External'=>'yellow','Database'=>'blue','Filesystem'=>'red', default=>'white'}; $output->writeln(sprintf('  <fg=%s>┌───────────────────┐</>', $col)); $output->writeln(sprintf('  <fg=%s>│ %-17s │</> <fg=gray>%s</>', $col, substr($n->name,0,17), $n->type)); $output->writeln(sprintf('  <fg=%s>└────────┬──────────┘</>', $col)); } else { $output->writeln('  <fg=gray>         ├──┬── Branch ('.count($nodes).')</>'); foreach($nodes as $n){ $col=match($n->type){'External'=>'yellow','Database'=>'blue','Filesystem'=>'red', default=>'white'}; $output->writeln(sprintf('  <fg=gray>         │</>  <fg=%s>▶ %-16s</> <fg=gray>%s</>', $col, substr($n->name,0,16), $n->type)); } $output->writeln('  <fg=gray>         │</>'); } }
+        $related=array_filter($payload['findings']??[], fn($f)=> str_contains(strtolower($f['entry']??''), strtolower($routeNode->name)));
+        if(!empty($related)){ $output->writeln(''); $output->writeln('  <fg=red;options=bold>⚠ Potential dangerous flow</>'); foreach($related as $rel) $output->writeln(sprintf('   <fg=red>%s</> <fg=white>%s</> <fg=gray>→ %s (%s)</>', $rel['id'],$rel['title'],$rel['sink'], strtolower($rel['severity']))); }
+        else { $output->writeln(''); $output->writeln('  <fg=green>✓ No dangerous flows flagged.</>'); }
+        $output->writeln(''); $output->writeln(sprintf('  <fg=gray>Depth: %d</>', $depth));
+        return 0;
+    }
+}
+
+class RatImpactStandalone extends Command
+{
+    public function __construct(){ parent::__construct('impact'); }
+    protected function configure(): void {
+        $this->setDescription('Show impact analysis for a file/class/model.')
+             ->addArgument('target', InputArgument::REQUIRED, 'File or class e.g. User.php')
+             ->addOption('format', null, InputOption::VALUE_OPTIONAL,'table|json','table')
+             ->addOption('no-image', null, InputOption::VALUE_NONE,'Disable image');
+    }
+    protected function execute(InputInterface $input, OutputInterface $output): int {
+        $target=(string)$input->getArgument('target'); $format=$input->getOption('format')??'table'; $noImage=(bool)$input->getOption('no-image');
+        $payload=rat_load_last_scan();
+        if(!$payload){ $output->writeln(' <fg=yellow>No prior scan — running quick analysis...</>'); $a=new Analyzer(getcwd(), rat_load_config()); $r=$a->analyze(); $payload=['graph'=>$r['graph']->toArray(),'findings'=>array_map(fn($f)=>$f->toArray(), $r['findings']),'stats'=>$r['stats']]; }
+        $graph=rat_hydrate_graph($payload['graph']??[]);
+        $node=rat_find_best_node($graph, $target) ?? $graph->findNodeByName(basename($target,'.php')) ?? $graph->findNodeByName($target);
+        if(!$node) foreach($graph->nodes() as $n) if($n->file && str_contains($n->file, basename($target,'.php'))){ $node=$n; break; }
+        if(!$node){ $output->writeln("<error> Target [$target] not found.</error>"); foreach(array_slice($graph->nodesByType('Model'),0,10) as $n) $output->writeln(' <fg=cyan>'.$n->name.'</>'); return 1; }
+        $impact=$graph->impactFor($node->id);
+        if($format==='json'){ $output->writeln(json_encode(['target'=>$node->toArray(),'impact'=>['direct'=>array_map(fn($n)=>$n->toArray(),$impact['direct']),'direct_by_type'=>$impact['direct_by_type'],'indirect'=>array_map(fn($n)=>$n->toArray(),$impact['indirect']),'indirect_by_type'=>$impact['indirect_by_type'],'score'=>$impact['score']]], JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)); return 0; }
+        if(!$noImage) RatBanner::render($output,true,false);
+        $output->writeln(''); $output->writeln('  <fg=white;options=bold>🐀 IMPACT ANALYSIS</>'); $output->writeln(''); $output->writeln(sprintf('  <fg=white;options=bold>%s</> <fg=gray>%s %s</>', $node->name,$node->type,$node->file?:'')); $output->writeln('');
+        $output->writeln('  <fg=white;options=bold>DIRECT DEPENDENTS</>'); $output->writeln('  <fg=gray>'.str_repeat('─',36).'</>');
+        $direct=$impact['direct_by_type']??[]; $indirect=$impact['indirect_by_type']??[];
+        $order=['Controller','Service','Job','Listener','Observer','Event','Middleware','Model','Route','Other'];
+        $printed=false; foreach($order as $t){ $cnt=$direct[$t]??0; if($cnt>0){ $output->writeln(sprintf('  <fg=gray>%-16s</> <fg=white;options=bold>%d</>', $t.'s',$cnt)); $printed=true; } }
+        foreach($direct as $t=>$cnt) if(!in_array($t,$order,true)){ $output->writeln(sprintf('  <fg=gray>%-16s</> <fg=white;options=bold>%d</>', $t.'s',$cnt)); $printed=true; }
+        if(!$printed) $output->writeln('  <fg=gray>No direct dependents.</>'); $output->writeln('');
+        $output->writeln('  <fg=white;options=bold>INDIRECT</>'); $output->writeln('  <fg=gray>'.str_repeat('─',36).'</>');
+        $printed=false; foreach($order as $t){ $cnt=$indirect[$t]??0; if($cnt>0){ $output->writeln(sprintf('  <fg=gray>%-16s</> <fg=white>%d</>', $t.'s',$cnt)); $printed=true; } }
+        foreach($indirect as $t=>$cnt) if(!in_array($t,$order,true)){ $output->writeln(sprintf('  <fg=gray>%-16s</> <fg=white>%d</>', $t.'s',$cnt)); $printed=true; }
+        if(!$printed) $output->writeln('  <fg=gray>No indirect.</>'); $output->writeln('');
+        $score=$impact['score']??'LOW'; $color=match($score){'CRITICAL'=>'red','HIGH'=>'yellow','MEDIUM'=>'cyan','LOW'=>'blue', default=>'gray'};
+        $bar=match($score){'CRITICAL'=>'████████████████████','HIGH'=>'██████████████████░░','MEDIUM'=>'████████████░░░░░░░░','LOW'=>'██████░░░░░░░░░░░░░░', default=>'██░░░░░░░░░░░░░░░░░░'};
+        $output->writeln('  <fg=white;options=bold>IMPACT SCORE</>'); $output->writeln(''); $output->writeln(sprintf('  <fg=%s>%s</>  <fg=%s;options=bold>%s</>', $color,$bar,$color,$score)); $output->writeln('');
+        if(!empty($impact['direct'])){ $output->writeln('  <fg=gray>Direct list:</>'); foreach(array_slice($impact['direct'],0,12) as $n) $output->writeln(sprintf('    <fg=gray>•</> <fg=white>%s</> <fg=gray>%s</>', $n->name,$n->type)); $output->writeln(''); }
+        return 0;
+    }
+}
+
+class RatBaselineStandalone extends Command
+{
+    public function __construct(){ parent::__construct('baseline'); }
+    protected function configure(): void {
+        $this->setDescription('Generate baseline so rat --ci only fails on new findings.')
+             ->addOption('update', null, InputOption::VALUE_NONE,'Update existing')
+             ->addOption('path', null, InputOption::VALUE_OPTIONAL,'Baseline path');
+    }
+    protected function execute(InputInterface $input, OutputInterface $output): int {
+        $cfg=rat_load_config();
+        $path=$input->getOption('path') ?: ($cfg['baseline']?? getcwd().'/.rat.baseline.json');
+        if(!str_starts_with($path,'/')) $path=getcwd().'/'.ltrim($path,'/');
+        if(file_exists($path) && !$input->getOption('update')){ $output->writeln("<comment> Baseline exists at $path — use --update</comment>"); return 1; }
+        $a=new Analyzer(getcwd(), $cfg); $r=$a->analyze();
+        $payload=['generated_at'=>date('c'),'tool'=>'RAT','findings'=>array_map(fn($f)=>$f->toArray(), $r['findings']),'stats'=>$r['stats']];
+        $dir=dirname($path); if(!is_dir($dir)) @mkdir($dir,0755,true);
+        file_put_contents($path, json_encode($payload, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
+        $output->writeln("<info> Baseline written to $path (".count($r['findings'])." findings).</info>");
+        return 0;
+    }
+}
+
+class RatUiStandalone extends Command
+{
+    public function __construct(){ parent::__construct('ui'); }
+    protected function configure(): void {
+        $this->setDescription('Start RAT UI (visual investigation layer).')
+             ->addOption('host', null, InputOption::VALUE_OPTIONAL,'Host','127.0.0.1')
+             ->addOption('port', null, InputOption::VALUE_OPTIONAL,'Port',7331)
+             ->addOption('no-open', null, InputOption::VALUE_NONE,'Do not open browser')
+             ->addOption('no-image', null, InputOption::VALUE_NONE,'Disable image');
+    }
+    protected function execute(InputInterface $input, OutputInterface $output): int {
+        $host=$input->getOption('host')?:'127.0.0.1'; $port=(int)($input->getOption('port')?:7331); $noImage=(bool)$input->getOption('no-image');
+        if(!$noImage) RatBanner::render($output,true,false);
+        $cfg=rat_load_config(); $output->writeln('  <fg=gray>Analyzing for UI...</>');
+        $a=new Analyzer(getcwd(), $cfg); $r=$a->analyze();
+        rat_persist($r['findings'],$r['stats'],$r['graph']);
+        $url="http://{$host}:{$port}";
+        // Ensure UI assets (.rat/ui)
+        $target=getcwd().'/.rat/ui'; if(!is_dir($target)) @mkdir($target,0755,true);
+        $index=$target.'/index.html'; $router=$target.'/router.php';
+        if(!file_exists($index)){
+            // copy from package resources if exists
+            $pkgIndex=dirname(__DIR__).'/resources/ui_dist_index.html';
+            // generate via RatUiCommand minimal replication - we embed via standalone simpler: reuse last scan html via PHP
+            // For brevity, create minimal html if missing by invoking RatUiCommand logic (we duplicate minimal)
+            // We'll just call the Illuminate command's helpers: generate quick html template
+            $html=file_get_contents(__DIR__.'/../resources/ui_template.html');
+            if(!$html) $html='<html><body><h1>RAT UI</h1><p>Run <code>php artisan rat:ui</code> for full UI or see .rat.last.json</p></body></html>';
+            // Instead use inline minimal similar to RatUiCommand - simplified
+            $html = @file_get_contents(__DIR__ . '/../src/Console/Commands/RatUiCommand.php');
+            // fallback simple
+            file_put_contents($index, '<!DOCTYPE html><html><head><meta charset="utf-8"><title>RAT UI</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-[#0b0c0f] text-white p-8"><h1 class="text-2xl font-bold">🐀 RAT UI</h1><p class="text-gray-400">Dashboard at '.$url.'</p><p class="text-sm text-gray-500 mt-4">Data: <a href="/api/data" class="text-cyan-400 underline">/api/data</a> | <a href="/last.json" class="text-cyan-400 underline">/last.json</a></p><script>fetch("/api/data").then(r=>r.json()).then(j=>{document.body.innerHTML+="<pre class=text-xs>"+JSON.stringify(j,null,2)+"</pre>"})</script></body></html>');
+        }
+        if(!file_exists($router)){
+            file_put_contents($router, <<<'PHP'
+<?php
+$uri=parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+$root=__DIR__; $cwd=dirname(__DIR__);
+if($uri==='/api/data' || $uri==='/last.json'){ $cands=[$cwd.'/.rat.last.json',$cwd.'/storage/rat/last.json']; foreach($cands as $p) if(file_exists($p)){ header('Content-Type: application/json'); readfile($p); exit; } http_response_code(404); echo json_encode(['error'=>'no data']); exit; }
+if(preg_match('/\.(?:png|js|css|json)$/',$uri)) return false;
+if(file_exists($root.'/index.html')){ readfile($root.'/index.html'); exit; }
+echo "RAT UI";
+PHP
+);
+        }
+        $output->writeln(''); $output->writeln('  <fg=white;options=bold>🐀 RAT UI</>'); $output->writeln(''); $output->writeln('  <fg=white>Dashboard:</> <fg=cyan;options=underline>'.$url.'</>');
+        $output->writeln('  <fg=gray>Watching... Ctrl+C to stop.</>'); $output->writeln('');
+        if(!$input->getOption('no-open')){
+            $os=PHP_OS_FAMILY; $cmd=null;
+            if($os==='Darwin') $cmd=sprintf('open %s >/dev/null 2>&1 &', escapeshellarg($url));
+            elseif($os==='Windows') $cmd=sprintf('start "" %s', escapeshellarg($url));
+            else $cmd=sprintf('xdg-open %s >/dev/null 2>&1 &', escapeshellarg($url));
+            if($cmd) @exec($cmd);
+        }
+        $docRoot=$target; $cmd=sprintf('%s -S %s:%d -t %s %s 2>&1', escapeshellarg(PHP_BINARY), escapeshellarg($host), $port, escapeshellarg($docRoot), escapeshellarg($router));
+        $output->writeln(sprintf('  <fg=gray>Serving:</> <fg=white>%s</>', $docRoot));
+        $proc=popen($cmd,'r'); if(!$proc){ $output->writeln('<error> Failed to start server. Port in use?</error>'); return 1; }
+        while(!feof($proc)){ $line=fgets($proc); if($line!==false){ $t=trim($line); if($t!=='') $output->writeln('  <fg=gray>[ui]</> '.$t); } }
+        pclose($proc); return 0;
+    }
+}
+
+$app = new Application('RAT', '1.0.0');
+$app->setCatchExceptions(true);
+
+// Main rat command as default when no subcommand given
+$default = new RatDefaultCommand();
+// Symfony: if we set default command, `rat` alone runs it
+$app->add($default);
+$app->add(new RatScanStandalone());
+$app->add(new RatShowStandalone());
+$app->add(new RatWhyStandalone());
+$app->add(new RatFlowStandalone());
+$app->add(new RatImpactStandalone());
+$app->add(new RatBaselineStandalone());
+$app->add(new RatUiStandalone());
+
+// Aliases: support artisan-style names with colon as well as short names
+// Symfony allows us to register aliases inside command definitions but easiest: clone commands under colon names via add with name manipulation
+// We'll register colon aliases automatically by re-adding a wrapper
+$aliases = [
+  'rat:scan' => 'scan',
+  'rat:show' => 'show',
+  'rat:why' => 'why',
+  'rat:flow' => 'flow',
+  'rat:impact' => 'impact',
+  'rat:baseline' => 'baseline',
+  'rat:ui' => 'ui',
+];
+foreach ($aliases as $colon => $short) {
+  $cmd = $app->find($short);
+  // Add alias by cloning definition — Symfony Command has setAliases
+  $cmd->setAliases(array_merge($cmd->getAliases(), [$colon]));
+}
+
+// If invoked without arguments, run default `rat` (scan)
+if ($argc === 1) {
+  // Show banner + run default implicitly
+  $_SERVER['argv'][] = 'rat';
+  $argv[] = 'rat';
+}
+
+$app->setDefaultCommand('rat', false);
+$app->run();
