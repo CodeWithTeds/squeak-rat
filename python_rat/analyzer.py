@@ -116,18 +116,37 @@ class Analyzer:
             sources=SourceDetector.detect(clean)
             sinks=SinkDetector.detect(clean)
             if not sources or not sinks: continue
-            # Build tainted vars: $x = $request->input(...) etc.
+            # Build tainted vs sanitized vars
             tainted_vars=set()
+            sanitized_vars=set()
+            # detect if file uses FormRequest (custom Request class)
+            has_formrequest = bool(re.search(r'\b[A-Z][a-zA-Z0-9_]*Request\s+\$request', raw))
             for line in clean.splitlines():
                 if SourceDetector.detect(line):
                     # find assignment LHS
                     m=re.search(r'(\$[a-zA-Z_]\w*)\s*=\s*.*(?:\$request|request\s*\()', line)
                     if m:
-                        tainted_vars.add(m.group(1))
+                        var=m.group(1)
+                        # sanitized if assigned via validate/validated/safe
+                        if re.search(r'->\s*(validate|validated|safe)\s*\(', line):
+                            sanitized_vars.add(var)
+                            # also if via FormRequest validated, consider sanitized
+                        else:
+                            # check for $request->only with allowlist? treat as tainted but lower risk — keep tainted but will be filtered for mass assignment
+                            tainted_vars.add(var)
                     # also capture superglobal assignments
                     for sup in re.findall(r'\$_GET|\$_POST|\$_REQUEST|\$_FILES|\$_COOKIE', line):
                         tainted_vars.add(sup)
                     tainted_vars.add("$request")  # for direct usage
+                # also detect $var = $request->safe()->only(...) etc even if SourceDetector didn't hit safe? safe is not in SOURCE_PATS
+                # safe/validated are sanitizers, not sources, so handle separately
+                m2=re.search(r'(\$[a-zA-Z_]\w*)\s*=\s*\$request->\s*(safe|validated)\b', line)
+                if m2:
+                    sanitized_vars.add(m2.group(1))
+                # $validated = $request->validate(...)
+                m3=re.search(r'(\$[a-zA-Z_]\w*)\s*=\s*\$request->\s*validate\s*\(', line)
+                if m3:
+                    sanitized_vars.add(m3.group(1))
             for sink in sinks:
                 sink_line=self._line_for_offset(clean, sink["offset"])
                 # precise taint: sink line must contain tainted var or direct source
@@ -148,21 +167,61 @@ class Analyzer:
                         break
                     cur=nxt
                 has_taint=False
-                # direct source inside sink line? check both clean and raw (raw catches interpolation)
-                if SourceDetector.detect(sink_line_content) or SourceDetector.detect(strip_php(sink_line_raw)) if sink_line_raw else False:
-                    # Need to ensure source detection on raw is not from string literal false; use clean for direct check, raw for tainted var fallback
-                    if SourceDetector.detect(sink_line_content):
-                        has_taint=True
-                if not has_taint:
-                    for tv in tainted_vars:
-                        if tv in sink_line_content or (sink_line_raw and tv in sink_line_raw):
+                # Special handling for dynamic sinks: check tainted function name, not argument
+                if sink["sink"] == "dynamic function call":
+                    m=re.search(r'\$([a-zA-Z_]\w*)\s*\(\s*\$', sink_line_content)
+                    if m:
+                        func_var="$"+m.group(1)
+                        if func_var in tainted_vars:
                             has_taint=True
-                            break
-                    # also handle interpolation: if sink is DB::raw and raw contains tainted var inside string placeholder
-                    if not has_taint and sink_line_raw:
+                        else:
+                            has_taint=False
+                            # not tainted function name → skip
+                            continue
+                    else:
+                        # fallback generic check
+                        if SourceDetector.detect(sink_line_content):
+                            has_taint=True
+                        else:
+                            for tv in tainted_vars:
+                                # only check function name var, not arg
+                                pass
+                            continue
+                elif sink["sink"] == "dynamic class instantiation":
+                    m=re.search(r'new\s+(\$[a-zA-Z_]\w*)', sink_line_content)
+                    if m and m.group(1) in tainted_vars:
+                        has_taint=True
+                    else:
+                        continue
+                else:
+                    # direct source inside sink line? check both clean and raw (raw catches interpolation)
+                    if SourceDetector.detect(sink_line_content) or SourceDetector.detect(strip_php(sink_line_raw)) if sink_line_raw else False:
+                        if SourceDetector.detect(sink_line_content):
+                            has_taint=True
+                    if not has_taint:
                         for tv in tainted_vars:
-                            if tv in sink_line_raw:
-                                has_taint=True; break
+                            if tv in sink_line_content or (sink_line_raw and tv in sink_line_raw):
+                                has_taint=True
+                                break
+                        if not has_taint and sink_line_raw:
+                            for tv in tainted_vars:
+                                if tv in sink_line_raw:
+                                    has_taint=True; break
+                # mass assignment with sanitized validated data is NOT a vuln
+                if sink["sink"] == "mass assignment":
+                    # if sink line uses sanitized var ($validated, $data from safe/validated), skip
+                    for sv in sanitized_vars:
+                        if sv in sink_line_content or (sink_line_raw and sv in sink_line_raw):
+                            has_taint=False
+                            break
+                    if not has_taint:
+                        continue
+                    # also if file uses FormRequest with safe/validated, treat as sanitized
+                    if has_formrequest and has_taint:
+                        # check if sink line contains $request->validated or safe
+                        if re.search(r'\$request->\s*(validated|safe)\b', sink_line_content):
+                            has_taint=False
+                            continue
                 # if not tainted, skip this sink (prevents false positive like file_get_contents($file) where $file is not tainted)
                 if not has_taint:
                     continue
@@ -233,12 +292,25 @@ class Analyzer:
             except: continue
             if not raw: continue
             clean=strip_php(raw)
-            # only controllers/services that look like admin/user-modifying (same as php Analyzer:236)
-            if not re.search(r'Controller|admin', str(fp), re.I) and "User::" not in clean:
+            # Only flag routable Controllers (not Actions, Traits, Requests, Tests)
+            # Precise: file must be a Controller and referenced by a Route
+            is_controller = fp.name.endswith("Controller.php") or "/Http/Controllers" in str(fp)
+            if not is_controller:
                 continue
+            # also skip if not referenced by any route (not exposed)
+            basename=fp.stem
+            is_routed=False
+            for rn in graph.nodes_by_type("Route"):
+                if basename in (rn.meta.get("action") or ""):
+                    is_routed=True
+                    break
+            if not is_routed:
+                # check if controller name appears in any route file
+                # fallback: if no routes found at all (empty), still check, else skip non-routed
+                if graph.nodes_by_type("Route"):
+                    continue
             if not AuthorizationAnalyzer.is_sensitive(clean): continue
             if AuthorizationAnalyzer.has_auth(clean): continue
-            basename=fp.stem
             # route middleware check via graph
             has_auth_route=False
             for rn in graph.nodes_by_type("Route"):
@@ -252,6 +324,9 @@ class Analyzer:
                             if rc and re.search(r'auth|can:|middleware.*auth', rc, re.I):
                                 has_auth_route=True; break
             if has_auth_route: continue
+            # also check if controller itself has auth middleware via $this->middleware or __construct
+            if re.search(r'middleware.*auth|->middleware.*auth', clean, re.I):
+                continue
             entry=self._infer_entry(graph, str(fp), basename)
             flow=self._build_flow(graph, str(fp), basename, "Model::update", "$request")
             findings.append({
@@ -289,6 +364,9 @@ class Analyzer:
             except ValueError:
                 rel=str(fp)
             if "python_rat" in rel or "verify_" in rel or "python_precise" in rel:
+                continue
+            # exclude tests and non-app code for hidden (informational)
+            if "/tests/" in rel or rel.startswith("tests/") or rel.endswith("Test.php") or "/Test" in rel:
                 continue
             try: raw=fp.read_text(errors="ignore")
             except: continue
@@ -335,19 +413,38 @@ class Analyzer:
         paths=self.config.get("paths", ["."])
         exclude=self.config.get("exclude", ["vendor","storage","bootstrap/cache","node_modules","public",".git"])
         files=collect_php_files(self.project_root, paths, exclude)
-        # Secret patterns
+        # Secret patterns - precise: exclude env() references
         secret_pats=[re.compile(p, re.I) for p in [r'sk_live_[0-9a-z]+', r'AKIA[0-9A-Z]{16}', r'aws_access_key', r'password\s*=\s*["\'][^"\']+["\']', r'secret\s*=\s*["\']']]
         for fp in files:
             try:
                 rel=str(fp.relative_to(self.project_root))
             except ValueError:
                 rel=str(fp)
+            # exclude tests and vendor for secrets
+            if "/tests/" in rel or rel.startswith("tests/"):
+                continue
             try: raw=fp.read_text(errors="ignore")
             except: continue
             clean=strip_php(raw)
             for pat in secret_pats:
-                for m in pat.finditer(clean):
-                    line=self._line_for_offset(clean, m.start())
+                for m in pat.finditer(raw):
+                    # exclude env() usage: secret key name inside env('AWS_ACCESS_KEY_ID') is not a hardcoded secret
+                    line_no=self._line_for_offset(raw, m.start())
+                    raw_lines=raw.splitlines()
+                    raw_line=raw_lines[line_no-1] if 1 <= line_no <= len(raw_lines) else ""
+                    # if line contains env(, it's not hardcoded (it's config key)
+                    if "env(" in raw_line:
+                        continue
+                    # also exclude use statements
+                    if raw_line.strip().startswith("use "):
+                        continue
+                    # also exclude config files that are template env calls
+                    if "config/" in rel and "env(" in raw:
+                        # check if match is inside env string
+                        snippet=raw[max(0,m.start()-50):m.end()+50]
+                        if "env(" in snippet:
+                            continue
+                    line=line_no
                     findings.append({
                         "id":"RAT-TMP-SEC",
                         "title":"Potential hardcoded secret",
@@ -365,14 +462,22 @@ class Analyzer:
                         "why": f"File {rel}:{line} contains string matching secret pattern `{m.group(0)[:40]}`. Verify not a real credential."
                     })
                     if len(findings)>15: break
-            # debug checks
-            if "APP_DEBUG=true" in raw or re.search(r'APP_ENV=production.*debug true|dd\(|dump\(', raw, re.I):
-                findings.append({
-                    "id":"RAT-TMP-DBG",
-                    "title":"Debug mode / debug endpoint",
-                    "description":"Debug enabled or dump statements found.",
-                    "severity":"medium","confidence":"high","entry":rel,"source":"config","sink":"debug exposure","flow":[rel,"debug"],"file":rel,"line":1,"recommendations":["Ensure APP_DEBUG=false in prod","Remove dd()/dump()"],"category":"security","why": f"File {rel} may expose debug info."
-                })
+            # debug checks - precise: word boundary for dd/dump, exclude Blade JS
+            if "APP_DEBUG=true" in raw or re.search(r'APP_ENV=production.*debug true|\bdd\s*\(|\bdump\s*\(', raw, re.I):
+                # exclude blade views containing JS classList.add which matched dd( previously
+                if "app.blade.php" in rel and "classList.add" in raw:
+                    pass
+                else:
+                    # also exclude if file is blade and contains only html
+                    if rel.endswith(".blade.php") and "<!DOCTYPE" in raw and "Vite" in raw:
+                        pass
+                    else:
+                        findings.append({
+                            "id":"RAT-TMP-DBG",
+                            "title":"Debug mode / debug endpoint",
+                            "description":"Debug enabled or dump statements found.",
+                            "severity":"medium","confidence":"high","entry":rel,"source":"config","sink":"debug exposure","flow":[rel,"debug"],"file":rel,"line":1,"recommendations":["Ensure APP_DEBUG=false in prod","Remove dd()/dump()"],"category":"security","why": f"File {rel} may expose debug info."
+                        })
             if len(findings)>20: break
         # dedup + limit
         seen=set()

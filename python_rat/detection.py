@@ -29,7 +29,8 @@ SINK_PATS = [
     (re.compile(r'redirect\s*\(\s*\$|Redirect\s*::\s*to\s*\(.*\$', re.I), "dynamic redirect", "medium"),
     (re.compile(r'\bunserialize\s*\(', re.I), "unserialize", "critical"),
     (re.compile(r'\bserialize\s*\(', re.I), "serialize", "medium"),
-    (re.compile(r'::\s*create\s*\(|\bupdate\s*\(.*\$request', re.I), "mass assignment", "high"),
+    # mass assignment: require ->update or ::create/::update (not function definition)
+    (re.compile(r'->\s*update\s*\(|::\s*create\s*\(|::\s*update\s*\(', re.I), "mass assignment", "high"),
 ]
 
 AUTH_PATS = [re.compile(p, re.I) for p in [
