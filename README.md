@@ -1,154 +1,128 @@
 <div align="center">
 
-<img src="rat.png" width="420" alt="RAT" style="border-radius:24px; box-shadow: 0 20px 60px rgba(124,58,237,0.35);" />
+<table>
+<tr>
+<td width="340" align="center" valign="middle">
+  <img src="rat.png" alt="RAT — squeak/rat" width="320" style="border-radius:20px; box-shadow: 0 20px 60px rgba(124,58,237,0.35);">
+</td>
+<td align="left" valign="middle">
 
-<br/>
+# 🐀 RAT
 
-<h1 style="color:#7c3aed; font-size:42px; margin: 16px 0 4px 0; letter-spacing: -1px;">🐀 RAT <span style="color:#a78bfa; font-weight:300;">squeak/rat</span></h1>
+### Terminal-first Laravel *Security* & *Behavior* Analyzer
 
-<p style="color:#8b5cf6; font-size:16px; letter-spacing: 4px; text-transform:uppercase; margin:0;">Laravel Security & Behavior Analyzer • 2026 Edition</p>
+**Forensic · Taint Analysis · Attack-Surface — from a single request**
 
-<p style="color:#a1a1aa; font-size:14px; margin-top:8px;">Terminal forensic tool for Laravel — <i style="color:#c4b5fd;">RAT follows the trail.</i></p>
+> 🐀 **Your request is already there. Why audit manually when the path it will take through your application can be traced automatically?**
 
-<p>
-<img src="https://img.shields.io/badge/PHP-8.1%E2%80%938.4-7c3aed?style=for-the-badge&logo=php&logoColor=white" />
-<img src="https://img.shields.io/badge/Laravel-9%20%7C%2010%20%7C%2011%20%7C%2012-8b5cf6?style=for-the-badge&logo=laravel&logoColor=white" />
-<img src="https://img.shields.io/badge/Terminal-Violet_2026-7c3aed?style=for-the-badge" />
-<img src="https://img.shields.io/badge License-MIT-a78bfa?style=for-the-badge" />
-</p>
+</td>
+</tr>
+</table>
 
-<p style="color:#71717a; font-size:12px;">Whole codebase • Vendor excluded • Monolith + Modular Monolith + Microservices • 0 or ALL findings • Any architecture</p>
-
-</div>
-
----
-
-<div style="background: linear-gradient(135deg, #0a0a0f 0%, #1a0b2e 50%, #0a0a0f 100%); border: 1px solid #2d1b4e; border-radius:16px; padding:24px; margin:24px 0;">
-
-### <span style="color:#a78bfa;">▌</span> Why RAT?
-
-<pre style="color:#c4b5fd; background:transparent; border:none; margin:0; font-size:13px;">
-Developer:  "What happens if this endpoint is called?"
-
-RAT:        "Let me show you."
-            Route → Middleware → Controller → Service → Model → Observer → Job → External
-            with <span style="color:#8b5cf6;">SOURCE → SINK</span> taint, <span style="color:#a78bfa;">CONFIDENCE</span>, and <span style="color:#7c3aed;">FIX</span>.
-</pre>
-
-> Not a linter. Not a dashboard. Not 500 warnings. **3 important findings > 300 noise.**
-
-</div>
-
----
-
-## <span style="color:#8b5cf6;">◆</span> Install — 2026
-
-### Standalone (any PHP project, no Laravel required)
-
-```bash
-git clone https://github.com/squeak/rat.git squeak-rat && cd squeak-rat
-composer install
-chmod +x bin/rat
-php bin/rat --help
-# optional global
-ln -s $(pwd)/bin/rat /usr/local/bin/rat
-rat --deep
-```
-
-### Laravel Package `squeak/rat`
+[![PHP ^8.1|^8.2|^8.3|^8.4](https://img.shields.io/badge/PHP-^8.1%7C8.2%7C8.3%7C8.4-7c3aed?style=for-the-badge&logo=php&logoColor=white)](https://php.net)
+[![Laravel 9|10|11|12](https://img.shields.io/badge/Laravel-9%20%7C%2010%20%7C%2011%20%7C%2012-8b5cf6?style=for-the-badge&logo=laravel&logoColor=white)](https://laravel.com)
+[![squeak/rat v1.0.0](https://img.shields.io/badge/squeak%2Frat-v1.0.0-7c3aed?style=for-the-badge)](https://github.com/squeak/rat)
+[![Tests](https://img.shields.io/badge/tests-passing-22c55e?style=for-the-badge)](tests)
+[![License MIT](https://img.shields.io/badge/license-MIT-a78bfa?style=for-the-badge)](LICENSE)
+[![Violet 2026](https://img.shields.io/badge/Terminal-Violet_2026-7c3aed?style=for-the-badge)](#)
+[![Owner Prof Alex / TE-AD](https://img.shields.io/badge/owner-Prof%20Alex%20%2F%20TE--AD-8b5cf6?style=for-the-badge)](https://github.com/squeak/rat)
 
 ```bash
 composer require squeak/rat --dev
-php artisan vendor:publish --tag=rat-config  # → config/rat.php
-php artisan rat --help
+php artisan rat --deep
 ```
-
-> **Requires:** `PHP ^8.1|^8.2|^8.3|^8.4`, `ext-json`, `ext-mbstring` · `ext-gd` optional (true-color `rat.png` half-block `▀` — falls back to violet block letters `█████╗` on plain terminals) · `nikic/php-parser ^4|^5` · `symfony/console ^6|^7|^8` · `illuminate/* ^9|^10|^11|^12`
-
----
-
-## <span style="color:#8b5cf6;">◆</span> Banner First — Violet 2026
-
-Every run starts with `rat.png` **before** scanning — `src/Support/RatBanner.php:32` + `src/Support/TerminalImage.php:26`:
-
-* **Inline** (iTerm2 / WezTerm / VSCode / Ghostty / Kitty) → OSC 1337 `rat.png` image
-* **True-color fallback** (any terminal with GD) → half-block `▀` 36×18 violet-shaded RAT
-* **Plain** (`--no-image` or no GD) → violet block letters
-
-```text
-  ██████╗  █████╗ ████████╗
-  ██╔══██╗██╔══██╗╚══██╔══╝  🐀 RAT — Laravel Security & Behavior Analyzer
-  ██████╔╝███████║   ██║     RAT follows the trail.  2026 VIOLET • #8b5cf6
-  ──────────────────────────────────────────────────────────
-  🐀 RAT // DEEP SECURITY SCAN  Advanced data-flow + behavior analysis
-```
-
-`--no-image` disables image, `--compact` single line for CI.
-
----
-
-## <span style="color:#8b5cf6;">◆</span> Quick Start
-
-```bash
-# 1) Scan — interactive chooser on TTY (vendor/storage/public/.git always excluded)
-php artisan rat
-# ? What should RAT scan?
-#   [0] Whole codebase (all PHP — recommended)      ← default '.'
-#   [1] Laravel lot (monolith + modular + microservices)
-#   [2] Security scan (22 families → SECURITYSCAN.md)
-#   [3] Deep security scan — Advanced data-flow + behavior
-#   [4] Use config/rat.php
-#   [5] Custom — you type paths
-
-# 2) Flags — no prompt, CI friendly
-php artisan rat --all --no-image                 # whole codebase
-php artisan rat --path=app,routes                # limited
-php artisan rat --security --no-image            # security scan
-php artisan rat --deep --no-image                # deep scan
-php artisan rat --deep --format=json > report.json
-```
-
-**Standalone `bin/rat` mirrors all flags:**
-```bash
-php bin/rat --deep
-php bin/rat --security --all
-php bin/rat --path=Modules/Billing --format=json
-rat --deep  # after ln -s
-```
-
----
-
-## <span style="color:#8b5cf6;">◆</span> What RAT Sees
-
-| <span style="color:#8b5cf6;">Scan</span> | **Checks** |
-|---|---|
-| **Whole codebase** | All PHP under `.` except `exclude` — any architecture |
-| **Laravel lot** | `app, routes, config, database, resources, Modules, Domain, src, packages, services, apps, microservices, tests` |
-| **Security scan** | 22 families — `SECURITYSCAN.md:17` |
-| **Deep** | Same + `depth=12`, lower cap, full tainted chain + hidden behavior |
-
-**Vulnerability families (defensive only, `Potential dangerous flow` + `Severity` + `Confidence`):**
-
-<div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px; color:#a1a1aa;">
-
-`[✓] Injection` `[✓] SQL injection` `[✓] Command injection` `[✓] XSS` `[✓] Path traversal` `[✓] SSRF` `[✓] Deserialization` `[✓] File upload` `[✓] Auth weak` `[✓] IDOR / Authz` `[✓] Mass assignment`
-
-`[✓] Open redirect` `[✓] Sensitive data` `[✓] Hardcoded secrets` `[✓] Debug endpoints` `[✓] Dynamic execution` `[✓] Rate-limit` `[✓] Resource exhaustion` `[✓] Queue/job` `[✓] Webhook` `[✓] CORS` `[✓] Insecure config`
 
 </div>
 
-See `SECURITYSCAN.md:1` for full table (sources → sinks, example `VulnerableController.php:15` `DB::select("...$search")` vs `shell_exec("cat $filename")`).
+---
 
-> **Security boundary `flow.md:818`:** RAT never exploits or runs payloads. It shows `WHERE it started → WHERE it went → WHY → CONFIDENCE → WHAT to review`.
+### Why RAT?
+
+> You trace a route. RAT shows the whole trail — not just the controller.
+
+<table>
+<tr>
+<td>
+
+**You give**
+```php
+POST /api/import
+  → ImportController::import()
+    → $request->file('document')
+      → Storage::put()
+```
+*or* any Laravel app:
+```
+app/Http/Controllers
+app/Services
+app/Models (Observers)
+routes/api.php
+Modules/Billing/...
+Domain/*/...
+services/auth-service/...
+```
+
+</td>
+<td>
+
+**You get — forensic, not noisy**
+```
+🐀 RAT-001  CRITICAL  Storage::put  HIGH
+ENTRY  POST /api/import
+SOURCE $request->file('document')
+FLOW   HTTP Request
+         ↓ ImportController
+         ↓ ImportService
+         ↓ Storage::put() → Filesystem
+WHY    User input reaches filesystem
+       without clear validation/boundary
+CONFIDENCE ██████████████████░░ HIGH
+FIX    auth, filename, path, mime
+```
+`3 important findings > 300 noise` — vendor excluded, `Potential dangerous flow` only.
+
+</td>
+</tr>
+</table>
+
+**No dashboard. No SaaS. No AI.** Pure PHP — runs 100% locally, `rat.png` violet before scanning (`src/Support/RatBanner.php:32`).
 
 ---
 
-## <span style="color:#8b5cf6;">◆</span> Terminal Output — Violet 2026
+### ✨ Analyzer, not just scanner
 
-```text
+| Generic scanner | **RAT — Forensic / Taint / Behavior** |
+|---|---|
+| Regex only | **+ Graph** `Route→Controller→Service→Model→Observer→Job→External` (`ApplicationGraph.php:1`) |
+| Lists files | **+ Traces** `SOURCE $request→input/query/file/$_GET` → `SINK 85+ Storage::put/DB::raw/shell_exec/Http/eval/redirect` |
+| No auth check | **+ Authz** `authorize()/Gate/Policy/can:` vs `User::update($request->all())` (`AuthorizationAnalyzer.php:1`) |
+| No hidden behavior | **+ Hidden** `Observer → Event → Listener → Job → Notification` (`HiddenBehaviorAnalyzer.php:1`) |
+| One project shape | **Monolith + Modular monolith + Microservices monorepo** (`RouteDiscovery.php:86`, `FileDiscovery.php:108`) |
+| No impact | **+ `rat:impact User.php` → DIRECT 12, INDIRECT 23, IMPACT HIGH** |
+| No flow viz | **+ `rat:flow "POST /api/import"` → branch `├─►`** |
+| Fixed paths | **All paths configurable — `config/rat.php:19` or `--path=`** |
+
+Use it as:
+- **Security review** before deploy (`--security`, `--deep` → `SECURITYSCAN.md:17` 22 families)
+- **Behavior map** for new devs (`rat:why UserService` → why has Redis?)
+- **Blast radius** for refactors (`rat:impact Order.php`)
+- **CI gate** (`rat --ci --fail-on=high`, `rat:baseline`)
+
+---
+
+### ⚡ 10 seconds to first findings
+
+```bash
+composer require squeak/rat --dev
+php artisan rat --deep
+```
+
+```
+🐀 RAT — squeak/rat 2026 VIOLET • #8b5cf6
+  🐀 RAT // DEEP SECURITY SCAN  Advanced data-flow + behavior analysis
+
   Analyzing application behavior...
-
-  <violet>████████████████████░░ 100%</violet>
+  ████████████████████░░ 100%
 
   Routes ................ 5
   Controllers ........... 3
@@ -164,122 +138,174 @@ See `SECURITYSCAN.md:1` for full table (sources → sinks, example `VulnerableCo
     rat flow "GET /vulnerable/sql-injection" --depth=12
 ```
 
-**Deep dive:**
+<details>
+<summary>Chooser + CI / non-interactive</summary>
+
 ```bash
-php artisan rat:show RAT-001   # or rat show RAT-001
+php artisan rat
+# ? What should RAT scan? (vendor/storage/public/.git always excluded)
+#   [0] Whole codebase (all PHP — recommended)      ← '.'
+#   [1] Laravel lot (monolith + modular + microservices)
+#   [2] Security scan (22 families → SECURITYSCAN.md)
+#   [3] Deep security scan — Advanced data-flow + behavior
+#   [4] Use config/rat.php
+#   [5] Custom — you type paths
+
+# flags — no prompt, CI friendly
+php artisan rat --all --no-image                 # whole
+php artisan rat --path=app,routes                # limited
+php artisan rat --security --no-image            # security
+php artisan rat --deep --no-image                # deep
+php artisan rat --deep --format=json > report.json
+php artisan rat --deep --ci --fail-on=high      # exit 1 if ≥ high
+php artisan rat:baseline --update               # snapshot → --ci only fails on new
+# standalone
+php bin/rat --deep
+rat --security --format=ndjson
 ```
-```text
-🐀 RAT-001  CRITICAL  DB::raw  HIGH
-ENTRY POINT  GET /vulnerable/sql-injection
-SOURCE  $request->query('q')
-FLOW  HTTP Request → Route → VulnerableController → DB::select → Database
-WHY  User input reaches DB::raw at app/Http/Controllers/VulnerableController.php:15
-CONFIDENCE  ██████████████████░░ HIGH
-RECOMMENDATION  Use bindings, validate, prefer builder
-LOCATION  app/Http/Controllers/VulnerableController.php:15
-  14  $search = $request->query('q');
-  ›15 $results = DB::select("SELECT * FROM users WHERE name = '$search'");
+</details>
+
+### 📁 Scan scope — you choose where RAT looks
+
+Whole codebase by default (`paths: ['.']` in `config/rat.php:19` — all PHP except `exclude: vendor/storage/bootstrap/cache/node_modules/public/.git`). Limit per run, no config edit:
+
+```bash
+php artisan rat --path=Modules/Billing --no-image
+# → only Modules/Billing + its Routes
+
+php artisan rat --path=services/payment-service,services/user-service
+# → microservices monorepo — two services only
+
+php artisan rat --path=app,Domain --format=json
+# → monolith + DDD
+
+# permanent: config/rat.php
+'paths' => ['app','Modules','Domain','services'],
+'exclude' => ['vendor','storage'],
 ```
+
+`RouteDiscovery.php:86` covers `routes/*.php` + `Modules/*/Routes/*.php` + `Domain/*/Routes/*.php` + `services/*/routes/*.php` + `apps/*/routes/*.php`.
 
 ---
 
-## <span style="color:#8b5cf6;">◆</span> Commands — All Violet
+### 🧬 Inputs — Any architecture → one graph
 
-| Command | What |
-|---|---|
-| `php artisan rat` | Interactive scan — banner first, choice, progress, findings |
-| `php artisan rat:scan --deep` | Non-interactive deep scan, persist `storage/rat/last.json` + `.rat.last.json` |
-| `php artisan rat:show` | List all — `[All] [Critical] [High] [Medium] [Low]` + search |
-| `php artisan rat:show RAT-001` | Full forensic view (above) |
-| `php artisan rat:show high --format=json` | Filtered JSON |
-| `php artisan rat:why UserController` | `WHO` depends → `WHY` has `Redis` trail |
-| `php artisan rat:flow "POST /api/import"` | Visual flow with `├─► Branch` |
-| `php artisan rat:impact User.php` | `DIRECT 12, INDIRECT 23, IMPACT HIGH` |
-| `php artisan rat:baseline` | Write `.rat.baseline.json` — `--ci` then only fails on **new** |
-| `php artisan rat:ui` | Dark 2026 UI `http://127.0.0.1:7331` — same engine |
-| `rat` / `php bin/rat` | Standalone mirrors all: `rat --deep`, `rat scan --security`, `rat show`, `rat why`, `rat flow`, `rat impact`, `rat baseline`, `rat ui` |
+**Monolith** `app/Http/Controllers`, `routes/api.php`  
+**Modular monolith** `Modules/Billing/Http/Controllers/InvoiceController.php`, `Domain/Entity/Aggregate`  
+**Microservices** `services/auth-service/app/Http/Controllers`, `apps/admin/routes/api.php`  
+**DDD** `Domain/Billing/Entity/Invoice.php`, `Application/Service/InvoiceService.php`
 
-**Machine-readable:**
-```bash
-php artisan rat --format=json
-php artisan rat --format=ndjson
-php artisan rat:scan --deep --format=json
-rat why UserController --format=json
-rat impact User --format=json
-rat flow "GET /vulnerable/sql-injection" --format=json
-```
+`FileDiscovery.php:108` suffix/content heuristics (`*Controller`, `*Service`, `*Repository`, `*Job`, `extends Model`, `ShouldQueue`, `*Action/*Handler`) work across all.
 
 ---
 
-## <span style="color:#8b5cf6;">◆</span> CI — 2026
+### 🧩 What gets flagged — Vulnerability families (defensive only)
 
-```bash
-php artisan rat --ci --fail-on=high          # exit 1 if ≥ high
-php artisan rat --deep --ci --fail-on=medium
-php artisan rat:baseline --update             # snapshot → --ci only fails on new
-```
+<div style="background: linear-gradient(135deg, #1e0a3a 0%, #2d1b4e 50%, #1e0a3a 100%); border: 2px solid #8b5cf6; border-radius:16px; padding:20px; box-shadow: 0 12px 40px rgba(139,92,246,0.25);">
 
-`config/rat.php:19`:
-```php
-'fail_on' => 'high', // critical|high|medium|low|info|null
-'paths' => ['.'],    // whole codebase — change to ['app','routes'] to limit
-'exclude' => ['vendor','storage','bootstrap/cache','node_modules','public','.git'],
-'baseline' => base_path('.rat.baseline.json'),
-```
+<div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:13px; color:#e9d5ff; font-weight:600; line-height:1.6;">
 
----
+`[✓] Injection` `[✓] SQL injection` `[✓] Command injection` `[✓] XSS` `[✓] Path traversal` `[✓] SSRF` `[✓] Deserialization` `[✓] File upload` `[✓] Auth weak` `[✓] IDOR / Authz` `[✓] Mass assignment`
 
-## <span style="color:#8b5cf6;">◆</span> Architecture Coverage
-
-<div style="border:1px solid #2d1b4e; border-radius:12px; padding:16px; background:#0a0a0f;">
-
-**Monolith** → `app`, `routes`  
-**Modular monolith** → `Modules/*/Routes/*.php`, `Domain/*/Routes/*.php`, `src/*/Routes/*.php` (`RouteDiscovery.php:86`) + `FileDiscovery.php:108` suffix/content heuristics for `Controller|Model|Service|Job|Event|Listener|Observer|Middleware` across `Modules/`, `Domain/`, `src/`, `packages/`  
-**Microservices** → `services/*/routes/*.php`, `apps/*/routes/*.php`, `microservices/*/routes/*.php` or per-service repo (`'.'` from service root)  
-**0 or ALL** → `0 Routes` handled, `Files 27` whole scan capped `80 → dedup → 15` sorted by severity
+`[✓] Open redirect` `[✓] Sensitive data` `[✓] Hardcoded secrets` `[✓] Debug endpoints` `[✓] Dynamic execution` `[✓] Rate-limit` `[✓] Resource exhaustion` `[✓] Queue/job` `[✓] Webhook` `[✓] CORS` `[✓] Insecure config`
 
 </div>
 
-Default prompts let you pick architecture; `--all` / `--security` / `--deep` force whole codebase.
+</div>
+
+Each: `Potential dangerous flow` + `Severity CRITICAL/HIGH/MEDIUM/LOW` + `Confidence HIGH/MEDIUM/LOW` + `ENTRY → SOURCE → SINK → FLOW` + `FILE:LINE` + code snippet + `WHY` + `RECOMMENDATION`. See `SECURITYSCAN.md:1` for full table ( `VulnerableController.php:15` `DB::select("...$search")` vs `shell_exec("cat $filename")` ).
+
+> **Security boundary `flow.md:818`:** RAT never exploits or runs payloads. It shows `WHERE it started → WHERE it went → WHY → CONFIDENCE → WHAT to review`.
 
 ---
 
-## <span style="color:#8b5cf6;">◆</span> Engine
+### 🎨 Customize Everything — Violet 2026
 
+```php
+// config/rat.php
+return [
+  'fail_on' => 'high', // critical|high|medium|low
+  'paths' => ['.'],    // whole codebase — or ['app','Modules']
+  'exclude' => ['vendor','storage','bootstrap/cache','node_modules','public','.git'],
+  'analysis' => ['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true],
+  'baseline' => base_path('.rat.baseline.json'),
+  'ui' => ['host'=>'127.0.0.1','port'=>7331],
+];
 ```
-RAT ENGINE
-   │
-   ├─ RouteDiscovery (monolith + modular + microservices patterns)
-   ├─ FileDiscovery (app/routes/config/database/resources/Modules/Domain/src/packages/services/apps/tests)
-   ├─ Graph (ApplicationGraph: Route→Controller→Service→Model→Observer→Job→External, edges CALLS|DISPATCHES|TRIGGERS|WRITES)
-   ├─ Detection (Source $request→input/query/file + Sink 85+ Storage::put/DB::raw/shell_exec/Http/eval/unserialize/redirect)
-   ├─ Analyzer (auth: authorize/Gate/Policy/can: vs User::update, hidden: Observer→Event→Job)
-   └─ Reporters (Table / JSON / NDJSON) + CLI / Web UI (same engine)
-```
+
+Banner — violet `#8b5cf6/#7c3aed/#a78bfa` (`RatBanner.php:32`), `rat.png` inline OSC1337 where supported + GD half-block `▀` fallback (`TerminalImage.php:26`), `--no-image` disables, `--compact` single line.
+
+Progress — violet `████████████████████░░` (`RatCommand.php:118`).
 
 ---
 
-## <span style="color:#8b5cf6;">◆</span> Try Here
+### 🛡️ Safety & DX — Violet
+
+- **Never overwrites** findings without `rat:baseline --update`
+- **`--deep`** depth 12, lower cap, full chain — `0` or `ALL` handled, capped `80 → dedup → 15` sorted by severity
+- **Terminal-first** — `rat`/`bin/rat` standalone without Laravel, `php artisan rat` when installed
+- **Machine-readable** `rat --format=json|ndjson` + `rat:why`/`rat:flow`/`rat:impact` also `--format=json`
+- **CI** `rat --ci --fail-on=high` (baseline-aware), `rat:baseline`
+- **UI** `rat:ui` → `http://127.0.0.1:7331` dark violet, same engine
+
+---
+
+### 🏗️ Architecture — 2026
+
+```
+src/
+├── Support/RatBanner.php + TerminalImage.php   # violet banner + rat.png
+├── Engine/Analyzer.php                         # 5 phases: routes → files → graph → taint → auth/hidden
+│   ├── Discovery/RouteDiscovery.php            # monolith + modular + microservices patterns
+│   │            FileDiscovery.php              # suffix/content across Modules/Domain/src/packages/services
+│   ├── Graph/ApplicationGraph.php              # Route→Controller→Service→Model→Observer→Job→External
+│   ├── Detection/SourceDetector.php → SinkDetector.php (85+ sinks)
+│   │           AuthorizationAnalyzer.php, HiddenBehaviorAnalyzer.php
+│   └── Reporters/JsonReporter.php
+├── Console/Commands/ rat, rat:scan --deep, rat:show, rat:why, rat:flow, rat:impact, rat:baseline, rat:ui
+└── RatServiceProvider.php                      # config publish
+```
+
+No giant scanner. Each detector isolated, testable, violet.
+
+---
+
+### 🧪 Tests
 
 ```bash
-# this package
-cd /Applications/XAMPP/xamppfiles/htdocs/package-contribution/rat
-php bin/rat --deep --no-image   # violet banner + rat.png
-
-# your vulnerable test app (already has VulnerableController.php:12)
-cd /Applications/XAMPP/xamppfiles/htdocs/package-contribution/test-rat/app
-php /Applications/XAMPP/xamppfiles/htdocs/package-contribution/rat/bin/rat --deep --no-image
-php /Applications/XAMPP/xamppfiles/htdocs/package-contribution/rat/bin/rat show RAT-001 --no-image
+composer install
+composer test # vendor/bin/phpunit
+php bin/rat --deep --no-image   # self-scan → violet
 ```
 
 ---
 
-<div align="center" style="margin-top:32px; padding:24px; border:1px solid #2d1b4e; border-radius:16px; background:#0a0a0f;">
+### 📦 Install (GitHub) — Prof Alex / TE-AD
 
-<span style="color:#8b5cf6; font-size:20px;">🐀 RAT</span> <span style="color:#a78bfa;">squeak/rat</span> <span style="color:#52525b;">2026</span>
+```bash
+composer config repositories.squeak-rat vcs https://github.com/squeak/rat.git
+composer require squeak/rat:@dev --dev
+# once on Packagist:
+composer require squeak/rat --dev
+```
+Once published: `squeak/rat` (`composer.json:2` `name: squeak/rat`) — MIT, owner **Prof Alex / TE-AD**.
 
-<span style="color:#a1a1aa;">Terminal forensic tool for Laravel</span> • <span style="color:#c4b5fd;">RAT follows the trail.</span>
+Requires `PHP ^8.1|^8.2|^8.3|^8.4` · `Laravel 9|10|11|12|13`
 
-`composer require squeak/rat --dev` • `php artisan rat --deep` • `rat.png` violet
+---
+
+### 🗺️ Roadmap — Violet 2026
+
+- `--api` / `--web` presets, enum casts, factories, `--all` for multi-table ERD, `rat:why --depth=20`
+
+PRs welcome. Build your next audit with `php artisan rat --deep`.
+
+---
+
+<div align="center">
+
+**Built for builders who ship features, not vulnerabilities.**
+
+<span style="color:#8b5cf6;">MIT</span> · Owned by **Prof Alex / TE-AD** · [github.com/squeak/rat](https://github.com/squeak/rat) · [Report issue](https://github.com/squeak/rat/issues) · `php artisan rat --deep` · <span style="color:#7c3aed;">🐀 RAT follows the trail. 2026 VIOLET</span>
 
 </div>
