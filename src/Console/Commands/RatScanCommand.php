@@ -98,6 +98,12 @@ class RatScanCommand extends Command
             if (empty($cfg['paths'])) $cfg['paths'] = ['.'];
         }
 
+        // Prefer Python precise scanner if available — delegate after scope (keeps PHP chooser UI)
+        if ($this->shouldDelegateToPython()) {
+            $exit = $this->delegateToPythonWithCfg($cfg, $format);
+            if ($exit !== null) return $exit;
+        }
+
         $analyzer = new Analyzer(getcwd(), $cfg);
         $result = $analyzer->analyze();
 
@@ -172,5 +178,66 @@ class RatScanCommand extends Command
             try { $cfg = require $path; if (is_array($cfg)) return $cfg; } catch (\Throwable $e) {}
         }
         return ['fail_on'=>'high','paths'=>['.'],'exclude'=>['vendor','storage','bootstrap/cache','node_modules','public','.git','.idea','.vscode'],'analysis'=>['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true]];
+    }
+
+    private function shouldDelegateToPython(): bool
+    {
+        if (getenv('RAT_USE_PHP') === '1' || getenv('RAT_PYTHON') === '0') return false;
+        return $this->findPython() !== null && $this->findRatPy() !== null;
+    }
+    private function findPython(): ?string
+    {
+        foreach (['python3','python','py'] as $bin) {
+            $out=@shell_exec(escapeshellarg($bin).' --version 2>&1');
+            if ($out && str_contains(strtolower($out),'python')) return $bin;
+        }
+        return null;
+    }
+    private function findRatPy(): ?string
+    {
+        $cands=[getcwd().'/vendor/squeak/rat/rat.py', dirname(__DIR__,3).'/rat.py', '/Applications/XAMPP/xamppfiles/htdocs/package-contribution/rat/rat.py', getcwd().'/rat.py'];
+        foreach ($cands as $p) if (file_exists($p)) return $p;
+        return null;
+    }
+    private function delegateToPython(): ?int
+    {
+        $py=$this->findPython(); $ratPy=$this->findRatPy();
+        if (!$py||!$ratPy) return null;
+        $args=[];
+        foreach (['format','fail-on','path'] as $opt) {
+            $v=$this->option($opt);
+            if ($v!==null&&$v!=='') $args[]='--'.$opt.'='.escapeshellarg((string)$v);
+        }
+        foreach (['ci','no-image','all','security','deep'] as $b) {
+            try { if ((bool)$this->option($b)) $args[]='--'.$b; } catch (\Throwable $e) {}
+        }
+        $cmd=escapeshellarg($py).' '.escapeshellarg($ratPy).' '.implode(' ',$args);
+        $d=[0=>STDIN,1=>STDOUT,2=>STDERR];
+        $proc=@proc_open($cmd,$d,$pipes,getcwd());
+        if (is_resource($proc)) return proc_close($proc);
+        @passthru($cmd,$exit); return $exit;
+    }
+
+    private function delegateToPythonWithCfg(array $cfg, string $format): ?int
+    {
+        $py=$this->findPython(); $ratPy=$this->findRatPy();
+        if (!$py||!$ratPy) return null;
+        $args=[];
+        $analysis=$cfg['analysis'] ?? [];
+        $paths=$cfg['paths'] ?? ['.'];
+        if (!empty($analysis['deep'])) $args[]='--deep';
+        elseif (!empty($analysis['security'])) $args[]='--security';
+        elseif ($paths===['.']) $args[]='--all';
+        elseif ($paths===['app','routes','config','database','resources','Modules','modules','Domain','domain','Domains','src','packages','services','Services','apps','microservices','tests']) $args[]='--laravel';
+        else $args[]='--path='.escapeshellarg(implode(',',$paths));
+        if ($format!=='table') $args[]='--format='.escapeshellarg($format);
+        try { if ((bool)$this->option('ci')) $args[]='--ci'; } catch (\Throwable $e) {}
+        try { if ($this->option('fail-on')) $args[]='--fail-on='.escapeshellarg((string)$this->option('fail-on')); } catch (\Throwable $e) {}
+        try { if ((bool)$this->option('no-image')) $args[]='--no-image'; } catch (\Throwable $e) {}
+        $cmd=escapeshellarg($py).' '.escapeshellarg($ratPy).' '.implode(' ',$args);
+        $d=[0=>STDIN,1=>STDOUT,2=>STDERR];
+        $proc=@proc_open($cmd,$d,$pipes,getcwd());
+        if (is_resource($proc)) return proc_close($proc);
+        @passthru($cmd,$exit); return $exit;
     }
 }

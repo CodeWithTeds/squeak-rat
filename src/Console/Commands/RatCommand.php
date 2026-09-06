@@ -46,8 +46,9 @@ class RatCommand extends Command
 
         $isJson = in_array($format, ['json','ndjson'], true);
         $isPlain = $format === 'table' && ! $this->output->isDecorated();
+        $usePython = $this->shouldDelegateToPython();
 
-        if (! $isJson) {
+        if (! $isJson && ! $usePython) {
             RatBanner::render($this->output, ! $noImage, $compact);
 
             if ($deep) {
@@ -60,11 +61,24 @@ class RatCommand extends Command
             $this->output->writeln('');
             $this->output->writeln('  <fg=#8b5cf6>Scanning application...</>');
             $this->output->writeln('');
+        } elseif (! $isJson && $usePython) {
+            // Python will render its own violet banner — show a brief hand-off
+            if ($deep) {
+                $this->output->writeln('  <fg=#8b5cf6;options=bold>🐀 RAT // DEEP SECURITY SCAN (Python)</>');
+            } elseif ($security) {
+                $this->output->writeln('  <fg=#8b5cf6;options=bold>🐀 RAT // SECURITY SCAN (Python)</>');
+            }
         }
 
         $cfg = $this->loadRatConfig();
         // Decide scan scope: --deep / --security / --all / --path / interactive choice / config default
         $cfg = $this->resolveScanScope($cfg, $all, $pathOpt, $isJson, $security, $deep);
+
+        // Prefer Python precise scanner if available — delegate after scope is resolved (keeps PHP chooser UI, runs Python engine)
+        if ($this->shouldDelegateToPython()) {
+            $exit = $this->delegateToPythonWithCfg($cfg, $format, $ci, $failOn, $noImage, $compact);
+            if ($exit !== null) return $exit;
+        }
 
         $analyzer = new Analyzer(getcwd(), $cfg);
 
@@ -364,5 +378,144 @@ class RatCommand extends Command
             if (empty($cfg['paths'])) $cfg['paths'] = ['.'];
         }
         return $cfg;
+    }
+
+    private function shouldDelegateToPython(): bool
+    {
+        // Check if python3 and rat.py are available — prefer Python precise scanner
+        // Allow opt-out via RAT_USE_PHP=1
+        if (getenv('RAT_USE_PHP') === '1' || getenv('RAT_PYTHON') === '0') return false;
+        $py = $this->findPython();
+        $ratPy = $this->findRatPy();
+        return $py !== null && $ratPy !== null;
+    }
+
+    private function findPython(): ?string
+    {
+        $candidates = ['python3', 'python', 'py'];
+        foreach ($candidates as $bin) {
+            $out = @shell_exec(escapeshellarg($bin) . ' --version 2>&1');
+            if ($out && str_contains(strtolower($out), 'python')) {
+                return $bin;
+            }
+        }
+        // also try command -v
+        $which = trim((string) @shell_exec('command -v python3 2>&1'));
+        if ($which && file_exists($which)) return 'python3';
+        $which = trim((string) @shell_exec('which python3 2>&1'));
+        if ($which && file_exists($which)) return 'python3';
+        return null;
+    }
+
+    private function findRatPy(): ?string
+    {
+        $candidates = [];
+        // Laravel app vendor path
+        $candidates[] = getcwd() . '/vendor/squeak/rat/rat.py';
+        // Package dev root (when running from package itself)
+        $candidates[] = dirname(__DIR__, 3) . '/rat.py';
+        // Fallback absolute package path
+        $candidates[] = '/Applications/XAMPP/xamppfiles/htdocs/package-contribution/rat/rat.py';
+        // Also check relative to project root
+        $candidates[] = getcwd() . '/rat.py';
+        foreach ($candidates as $p) {
+            if (file_exists($p)) return $p;
+        }
+        return null;
+    }
+
+    private function delegateToPython(): ?int
+    {
+        $py = $this->findPython();
+        $ratPy = $this->findRatPy();
+        if (! $py || ! $ratPy) return null;
+
+        // Build args for python: translate artisan options to python rat.py flags
+        $args = [];
+        $map = [
+            'format' => '--format',
+            'fail-on' => '--fail-on',
+            'path' => '--path',
+        ];
+        foreach ($map as $opt => $flag) {
+            $val = $this->option($opt);
+            if ($val !== null && $val !== '') {
+                $args[] = $flag . '=' . escapeshellarg((string) $val);
+            }
+        }
+        // Boolean flags
+        foreach (['ci','json','no-image','compact','all','security','deep'] as $b) {
+            try {
+                if ((bool) $this->option($b)) {
+                    $args[] = '--' . $b;
+                }
+            } catch (\Throwable $e) {}
+        }
+        // Laravel lot: php has no --laravel flag, but python supports it via --laravel
+        // If user selected laravel via interactive chooser, we haven't yet shown chooser — so we delegate without args and let python show its chooser
+        // For non-interactive with explicit flags, we already have args; for interactive without flags, we just call python with no scope flags so it shows its own chooser
+
+        $cmd = escapeshellarg($py) . ' ' . escapeshellarg($ratPy);
+        if (! empty($args)) {
+            $cmd .= ' ' . implode(' ', $args);
+        }
+        // Preserve color: if artisan output is decorated, pass ANSI
+        // Run interactively, forwarding STDIN/STDOUT/STDERR
+        $descriptors = [
+            0 => STDIN,
+            1 => STDOUT,
+            2 => STDERR,
+        ];
+        // Use proc_open to forward interactivity
+        $proc = @proc_open($cmd, $descriptors, $pipes, getcwd());
+        if (is_resource($proc)) {
+            $exit = proc_close($proc);
+            return $exit;
+        }
+        // Fallback passthru
+        @passthru($cmd, $exit);
+        return $exit;
+    }
+
+    private function delegateToPythonWithCfg(array $cfg, string $format, bool $ci, ?string $failOn, bool $noImage, bool $compact): ?int
+    {
+        $py = $this->findPython();
+        $ratPy = $this->findRatPy();
+        if (! $py || ! $ratPy) return null;
+
+        $args = [];
+        // Translate resolved cfg to python flags
+        $analysis = $cfg['analysis'] ?? [];
+        $paths = $cfg['paths'] ?? ['.'];
+        // Map cfg to flags: deep > security > all > laravel > custom
+        if (! empty($analysis['deep'])) {
+            $args[] = '--deep';
+        } elseif (! empty($analysis['security'])) {
+            $args[] = '--security';
+        } elseif ($paths === ['.']) {
+            $args[] = '--all';
+        } elseif ($paths === ['app','routes','config','database','resources','Modules','modules','Domain','domain','Domains','src','packages','services','Services','apps','microservices','tests']) {
+            $args[] = '--laravel';
+        } else {
+            $args[] = '--path=' . escapeshellarg(implode(',', $paths));
+        }
+        // Forward other options
+        if ($format !== 'table') $args[] = '--format=' . escapeshellarg($format);
+        if ($ci) $args[] = '--ci';
+        if ($failOn) $args[] = '--fail-on=' . escapeshellarg($failOn);
+        if ($noImage) $args[] = '--no-image';
+        if ($compact) $args[] = '--compact';
+        // json alias
+        try { if ((bool) $this->option('json')) $args[] = '--json'; } catch (\Throwable $e) {}
+
+        $cmd = escapeshellarg($py) . ' ' . escapeshellarg($ratPy) . ' ' . implode(' ', $args);
+        $descriptors = [0 => STDIN, 1 => STDOUT, 2 => STDERR];
+        $proc = @proc_open($cmd, $descriptors, $pipes, getcwd());
+        if (is_resource($proc)) {
+            $exit = proc_close($proc);
+            return $exit;
+        }
+        @passthru($cmd, $exit);
+        return $exit;
     }
 }
