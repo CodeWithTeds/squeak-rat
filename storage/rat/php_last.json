@@ -1,0 +1,646 @@
+{
+    "generated_at": "2026-09-06T09:35:02+00:00",
+    "stats": {
+        "routes": 0,
+        "files": 27,
+        "by_type": {
+            "Controller": 7,
+            "Model": 1,
+            "Service": 1,
+            "Job": 1,
+            "Event": 0,
+            "Listener": 0,
+            "Observer": 0,
+            "Middleware": 0,
+            "Notification": 0,
+            "Other": 17
+        },
+        "graph": {
+            "nodes": 36,
+            "edges": 12,
+            "by_type": {
+                "Other": 17,
+                "Service": 2,
+                "Controller": 7,
+                "Model": 3,
+                "Job": 2,
+                "Observer": 1,
+                "Filesystem": 1,
+                "Database": 1,
+                "External": 1,
+                "Cache": 1
+            }
+        },
+        "findings": {
+            "critical": 0,
+            "high": 2,
+            "medium": 4,
+            "low": 0,
+            "info": 0
+        },
+        "project_root": "/Applications/XAMPP/xamppfiles/htdocs/package-contribution/rat"
+    },
+    "findings": [
+        {
+            "id": "RAT-001",
+            "title": "User input reaches file_get_contents",
+            "description": "User-controlled data reaches a sensitive operation.",
+            "severity": "high",
+            "confidence": "medium",
+            "entry": "Analyzer",
+            "source": "$request->input(",
+            "sink": "file_get_contents",
+            "flow": [
+                "HTTP Request",
+                "Analyzer",
+                "file_get_contents"
+            ],
+            "file": "src/Engine/Analyzer.php",
+            "line": 133,
+            "recommendations": [
+                "Review authorization and validation in this flow",
+                "Trace the source variable through intermediate calls"
+            ],
+            "category": "data_flow",
+            "why": "User-controlled input ($request->input() reaches file_get_contents in src/Engine/Analyzer.php:133. No clear security boundary was detected in the immediate path. Review authorization, validation, and sanitization."
+        },
+        {
+            "id": "RAT-002",
+            "title": "Potential authorization boundary missing",
+            "description": "Sensitive operation with no obvious authorization check detected.",
+            "severity": "high",
+            "confidence": "medium",
+            "entry": "FileDiscovery",
+            "source": "HTTP Request",
+            "sink": "Sensitive model operation",
+            "flow": [
+                "HTTP Request",
+                "FileDiscovery",
+                "Model::update"
+            ],
+            "file": "src/Engine/Discovery/FileDiscovery.php",
+            "line": 1,
+            "recommendations": [
+                "Verify that authentication middleware is applied",
+                "Check for $this->authorize() / Gate / Policy enforcement",
+                "Ensure route-level can: or auth middleware is present",
+                "Review manually \u2014 RAT cannot prove absence of auth"
+            ],
+            "category": "authorization",
+            "why": "File src/Engine/Discovery/FileDiscovery.php performs a sensitive operation (model write) with no obvious policy/gate/authorization middleware discovered in the analyzed path. This is a potential issue \u2014 review manually."
+        },
+        {
+            "id": "RAT-003",
+            "title": "Hidden side effect via observer / event",
+            "description": "Model lifecycle triggers hidden execution path (observer/event/job).",
+            "severity": "medium",
+            "confidence": "high",
+            "entry": "Analyzer",
+            "source": "Analyzer",
+            "sink": "Hidden execution path",
+            "flow": [
+                "Analyzer",
+                "Analyzer",
+                "Observer / Event",
+                "Job / Event / Notification"
+            ],
+            "file": "src/Engine/Analyzer.php",
+            "line": 1,
+            "recommendations": [
+                "Document the side effect for teammates",
+                "Ensure transactions and idempotency are handled",
+                "Verify authorization propagates to async jobs"
+            ],
+            "category": "hidden_behavior",
+            "why": "File src/Engine/Analyzer.php participates in a hidden execution chain (observer/event/listener/job). Use `rat:why Analyzer` to see the full trail."
+        },
+        {
+            "id": "RAT-004",
+            "title": "Hidden side effect via observer / event",
+            "description": "Model lifecycle triggers hidden execution path (observer/event/job).",
+            "severity": "medium",
+            "confidence": "high",
+            "entry": "Node",
+            "source": "Node",
+            "sink": "Hidden execution path",
+            "flow": [
+                "Node",
+                "Node",
+                "Observer / Event",
+                "Job / Event / Notification"
+            ],
+            "file": "src/Engine/Graph/Node.php",
+            "line": 1,
+            "recommendations": [
+                "Document the side effect for teammates",
+                "Ensure transactions and idempotency are handled",
+                "Verify authorization propagates to async jobs"
+            ],
+            "category": "hidden_behavior",
+            "why": "File src/Engine/Graph/Node.php participates in a hidden execution chain (observer/event/listener/job). Use `rat:why Node` to see the full trail."
+        },
+        {
+            "id": "RAT-005",
+            "title": "Hidden side effect via observer / event",
+            "description": "Model lifecycle triggers hidden execution path (observer/event/job).",
+            "severity": "medium",
+            "confidence": "high",
+            "entry": "FileDiscovery",
+            "source": "FileDiscovery",
+            "sink": "Hidden execution path",
+            "flow": [
+                "FileDiscovery",
+                "FileDiscovery",
+                "UserObserver",
+                "Job / Event / Notification"
+            ],
+            "file": "src/Engine/Discovery/FileDiscovery.php",
+            "line": 1,
+            "recommendations": [
+                "Document the side effect for teammates",
+                "Ensure transactions and idempotency are handled",
+                "Verify authorization propagates to async jobs"
+            ],
+            "category": "hidden_behavior",
+            "why": "File src/Engine/Discovery/FileDiscovery.php participates in a hidden execution chain (observer/event/listener/job). Use `rat:why FileDiscovery` to see the full trail."
+        },
+        {
+            "id": "RAT-006",
+            "title": "Hidden side effect via observer / event",
+            "description": "Model lifecycle triggers hidden execution path (observer/event/job).",
+            "severity": "medium",
+            "confidence": "high",
+            "entry": "HiddenBehaviorAnalyzer",
+            "source": "HiddenBehaviorAnalyzer",
+            "sink": "Hidden execution path",
+            "flow": [
+                "HiddenBehaviorAnalyzer",
+                "HiddenBehaviorAnalyzer",
+                "Observer / Event",
+                "Job / Event / Notification"
+            ],
+            "file": "src/Engine/Detection/HiddenBehaviorAnalyzer.php",
+            "line": 1,
+            "recommendations": [
+                "Document the side effect for teammates",
+                "Ensure transactions and idempotency are handled",
+                "Verify authorization propagates to async jobs"
+            ],
+            "category": "hidden_behavior",
+            "why": "File src/Engine/Detection/HiddenBehaviorAnalyzer.php participates in a hidden execution chain (observer/event/listener/job). Use `rat:why HiddenBehaviorAnalyzer` to see the full trail."
+        }
+    ],
+    "graph": {
+        "nodes": [
+            {
+                "id": "other:rat",
+                "type": "Other",
+                "name": "rat",
+                "file": "config/rat.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "service:RatServiceProvider",
+                "type": "Service",
+                "name": "RatServiceProvider",
+                "file": "src/RatServiceProvider.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "other:TerminalImage",
+                "type": "Other",
+                "name": "TerminalImage",
+                "file": "src/Support/TerminalImage.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "other:RatBanner",
+                "type": "Other",
+                "name": "RatBanner",
+                "file": "src/Support/RatBanner.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "controller:Analyzer",
+                "type": "Controller",
+                "name": "Analyzer",
+                "file": "src/Engine/Analyzer.php",
+                "line": 1,
+                "meta": {
+                    "hidden_behavior": [
+                        "observer",
+                        "listener",
+                        "job",
+                        "notification",
+                        "model_event"
+                    ]
+                }
+            },
+            {
+                "id": "model:User",
+                "type": "Model",
+                "name": "User",
+                "file": "",
+                "line": 0,
+                "meta": []
+            },
+            {
+                "id": "model:Model",
+                "type": "Model",
+                "name": "Model",
+                "file": "",
+                "line": 0,
+                "meta": []
+            },
+            {
+                "id": "other:Edge",
+                "type": "Other",
+                "name": "Edge",
+                "file": "src/Engine/Graph/Edge.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "controller:Node",
+                "type": "Controller",
+                "name": "Node",
+                "file": "src/Engine/Graph/Node.php",
+                "line": 1,
+                "meta": {
+                    "hidden_behavior": [
+                        "observer",
+                        "listener",
+                        "job",
+                        "model_event"
+                    ]
+                }
+            },
+            {
+                "id": "other:ApplicationGraph",
+                "type": "Other",
+                "name": "ApplicationGraph",
+                "file": "src/Engine/Graph/ApplicationGraph.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "controller:RouteDiscovery",
+                "type": "Controller",
+                "name": "RouteDiscovery",
+                "file": "src/Engine/Discovery/RouteDiscovery.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "route:Route",
+                "type": "Service",
+                "name": "Route",
+                "file": "",
+                "line": 0,
+                "meta": []
+            },
+            {
+                "id": "model:FileDiscovery",
+                "type": "Model",
+                "name": "FileDiscovery",
+                "file": "src/Engine/Discovery/FileDiscovery.php",
+                "line": 1,
+                "meta": {
+                    "hidden_behavior": [
+                        "observer",
+                        "listener",
+                        "job",
+                        "notification",
+                        "model_event"
+                    ]
+                }
+            },
+            {
+                "id": "job:Xxx",
+                "type": "Job",
+                "name": "Xxx",
+                "file": "",
+                "line": 0,
+                "meta": []
+            },
+            {
+                "id": "observer:UserObserver",
+                "type": "Observer",
+                "name": "UserObserver",
+                "file": "",
+                "line": 0,
+                "meta": []
+            },
+            {
+                "id": "other:Severity",
+                "type": "Other",
+                "name": "Severity",
+                "file": "src/Engine/Findings/Severity.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "other:Finding",
+                "type": "Other",
+                "name": "Finding",
+                "file": "src/Engine/Findings/Finding.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "storage:Storage",
+                "type": "Filesystem",
+                "name": "Storage",
+                "file": "",
+                "line": 0,
+                "meta": []
+            },
+            {
+                "id": "other:Confidence",
+                "type": "Other",
+                "name": "Confidence",
+                "file": "src/Engine/Findings/Confidence.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "other:JsonReporter",
+                "type": "Other",
+                "name": "JsonReporter",
+                "file": "src/Engine/Reporters/JsonReporter.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "other:Reporter",
+                "type": "Other",
+                "name": "Reporter",
+                "file": "src/Engine/Reporters/Reporter.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "job:HiddenBehaviorAnalyzer",
+                "type": "Job",
+                "name": "HiddenBehaviorAnalyzer",
+                "file": "src/Engine/Detection/HiddenBehaviorAnalyzer.php",
+                "line": 1,
+                "meta": {
+                    "hidden_behavior": [
+                        "observer",
+                        "listener",
+                        "job",
+                        "notification",
+                        "mail",
+                        "model_event"
+                    ]
+                }
+            },
+            {
+                "id": "other:SourceDetector",
+                "type": "Other",
+                "name": "SourceDetector",
+                "file": "src/Engine/Detection/SourceDetector.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "other:SinkDetector",
+                "type": "Other",
+                "name": "SinkDetector",
+                "file": "src/Engine/Detection/SinkDetector.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "db:DB",
+                "type": "Database",
+                "name": "DB",
+                "file": "",
+                "line": 0,
+                "meta": []
+            },
+            {
+                "id": "http:Http",
+                "type": "External",
+                "name": "Http",
+                "file": "",
+                "line": 0,
+                "meta": []
+            },
+            {
+                "id": "cache:Cache",
+                "type": "Cache",
+                "name": "Cache",
+                "file": "",
+                "line": 0,
+                "meta": []
+            },
+            {
+                "id": "other:AuthorizationAnalyzer",
+                "type": "Other",
+                "name": "AuthorizationAnalyzer",
+                "file": "src/Engine/Detection/AuthorizationAnalyzer.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "controller:RatUiCommand",
+                "type": "Controller",
+                "name": "RatUiCommand",
+                "file": "src/Console/Commands/RatUiCommand.php",
+                "line": 1,
+                "meta": {
+                    "hidden_behavior": [
+                        "listener",
+                        "job"
+                    ]
+                }
+            },
+            {
+                "id": "controller:RatWhyCommand",
+                "type": "Controller",
+                "name": "RatWhyCommand",
+                "file": "src/Console/Commands/RatWhyCommand.php",
+                "line": 1,
+                "meta": {
+                    "hidden_behavior": [
+                        "observer",
+                        "listener",
+                        "job",
+                        "model_event"
+                    ]
+                }
+            },
+            {
+                "id": "other:RatFlowCommand",
+                "type": "Other",
+                "name": "RatFlowCommand",
+                "file": "src/Console/Commands/RatFlowCommand.php",
+                "line": 1,
+                "meta": {
+                    "hidden_behavior": [
+                        "job"
+                    ]
+                }
+            },
+            {
+                "id": "other:RatScanCommand",
+                "type": "Other",
+                "name": "RatScanCommand",
+                "file": "src/Console/Commands/RatScanCommand.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "other:RatShowCommand",
+                "type": "Other",
+                "name": "RatShowCommand",
+                "file": "src/Console/Commands/RatShowCommand.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "controller:RatImpactCommand",
+                "type": "Controller",
+                "name": "RatImpactCommand",
+                "file": "src/Console/Commands/RatImpactCommand.php",
+                "line": 1,
+                "meta": {
+                    "hidden_behavior": [
+                        "observer",
+                        "listener",
+                        "job",
+                        "model_event"
+                    ]
+                }
+            },
+            {
+                "id": "other:RatBaselineCommand",
+                "type": "Other",
+                "name": "RatBaselineCommand",
+                "file": "src/Console/Commands/RatBaselineCommand.php",
+                "line": 1,
+                "meta": []
+            },
+            {
+                "id": "controller:RatCommand",
+                "type": "Controller",
+                "name": "RatCommand",
+                "file": "src/Console/Commands/RatCommand.php",
+                "line": 1,
+                "meta": {
+                    "hidden_behavior": [
+                        "job"
+                    ]
+                }
+            }
+        ],
+        "edges": [
+            {
+                "from": "controller:Analyzer",
+                "to": "model:User",
+                "kind": "WRITES",
+                "label": "User",
+                "meta": []
+            },
+            {
+                "from": "controller:Analyzer",
+                "to": "model:Model",
+                "kind": "WRITES",
+                "label": "Model",
+                "meta": []
+            },
+            {
+                "from": "controller:RouteDiscovery",
+                "to": "route:Route",
+                "kind": "DEPENDS_ON",
+                "label": "Route::",
+                "meta": []
+            },
+            {
+                "from": "model:FileDiscovery",
+                "to": "model:User",
+                "kind": "WRITES",
+                "label": "User",
+                "meta": []
+            },
+            {
+                "from": "model:FileDiscovery",
+                "to": "job:Xxx",
+                "kind": "DISPATCHES",
+                "label": "Xxx",
+                "meta": []
+            },
+            {
+                "from": "model:User",
+                "to": "observer:UserObserver",
+                "kind": "TRIGGERS",
+                "label": "observe",
+                "meta": []
+            },
+            {
+                "from": "other:Finding",
+                "to": "storage:Storage",
+                "kind": "DEPENDS_ON",
+                "label": "Storage::",
+                "meta": []
+            },
+            {
+                "from": "other:SourceDetector",
+                "to": "route:Route",
+                "kind": "DEPENDS_ON",
+                "label": "Route::",
+                "meta": []
+            },
+            {
+                "from": "other:SinkDetector",
+                "to": "storage:Storage",
+                "kind": "DEPENDS_ON",
+                "label": "Storage::",
+                "meta": []
+            },
+            {
+                "from": "other:SinkDetector",
+                "to": "db:DB",
+                "kind": "DEPENDS_ON",
+                "label": "DB::",
+                "meta": []
+            },
+            {
+                "from": "other:SinkDetector",
+                "to": "http:Http",
+                "kind": "DEPENDS_ON",
+                "label": "Http::",
+                "meta": []
+            },
+            {
+                "from": "other:SinkDetector",
+                "to": "cache:Cache",
+                "kind": "DEPENDS_ON",
+                "label": "Cache::",
+                "meta": []
+            }
+        ],
+        "stats": {
+            "nodes": 36,
+            "edges": 12,
+            "by_type": {
+                "Other": 17,
+                "Service": 2,
+                "Controller": 7,
+                "Model": 3,
+                "Job": 2,
+                "Observer": 1,
+                "Filesystem": 1,
+                "Database": 1,
+                "External": 1,
+                "Cache": 1
+            }
+        }
+    }
+}

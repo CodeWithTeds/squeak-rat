@@ -720,14 +720,15 @@ $app->setCatchExceptions(true);
 // Main rat command as default when no subcommand given
 $default = new RatDefaultCommand();
 // Symfony: if we set default command, `rat` alone runs it
-$app->add($default);
-$app->add(new RatScanStandalone());
-$app->add(new RatShowStandalone());
-$app->add(new RatWhyStandalone());
-$app->add(new RatFlowStandalone());
-$app->add(new RatImpactStandalone());
-$app->add(new RatBaselineStandalone());
-$app->add(new RatUiStandalone());
+$add = method_exists($app, 'add') ? 'add' : (method_exists($app, 'addCommand') ? 'addCommand' : 'add');
+$app->$add($default);
+$app->$add(new RatScanStandalone());
+$app->$add(new RatShowStandalone());
+$app->$add(new RatWhyStandalone());
+$app->$add(new RatFlowStandalone());
+$app->$add(new RatImpactStandalone());
+$app->$add(new RatBaselineStandalone());
+$app->$add(new RatUiStandalone());
 
 // Aliases: support artisan-style names with colon as well as short names
 // Symfony allows us to register aliases inside command definitions but easiest: clone commands under colon names via add with name manipulation

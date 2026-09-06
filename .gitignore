@@ -4,3 +4,4 @@
 /storage/rat/last.json
 /.rat/
 *.log
+__pycache__/
