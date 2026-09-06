@@ -294,6 +294,26 @@ Requires `PHP ^8.1|^8.2|^8.3|^8.4` · `Laravel 9|10|11|12|13`
 
 ---
 
+### 🔄 Update RAT
+
+```bash
+composer update squeak/rat --with-all-dependencies
+# clear old scan cache & rescan
+rm -f .rat.last.json storage/rat/last.json .rat/last.json
+php artisan rat --deep --no-image
+```
+
+If you installed via VCS (`repositories.squeak-rat vcs https://github.com/squeak/rat.git`):
+```bash
+composer clear-cache
+composer update squeak/rat --with-all-dependencies
+composer show squeak/rat | grep version
+```
+
+Standalone: `rm -rf vendor/squeak/rat && composer update` or pull the `rat/` folder directly.
+
+---
+
 ### 🗺️ Roadmap — Violet 2026
 
 - `--api` / `--web` presets, enum casts, factories, `--all` for multi-table ERD, `rat:why --depth=20`

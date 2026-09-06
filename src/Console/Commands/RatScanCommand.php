@@ -141,6 +141,7 @@ class RatScanCommand extends Command
         $this->output->writeln('');
         $this->output->writeln('  <fg=gray>Investigate:</> <fg=cyan>php artisan rat:show RAT-001</>  <fg=gray>|</> <fg=cyan>rat:flow "POST /api/import"</>');
         $this->output->writeln('  <fg=gray>Dashboard:</>  <fg=cyan>php artisan rat:ui</>            <fg=gray>(optional web UI)</>');
+        $this->output->writeln('  <fg=gray>Update:</>     <fg=cyan>composer update squeak/rat --with-all-dependencies</>');
 
         if ($this->option('ci')) {
             $failOn = $this->option('fail-on') ?? $cfg['fail_on'] ?? 'high';

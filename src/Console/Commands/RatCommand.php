@@ -211,6 +211,7 @@ class RatCommand extends Command
     {
         $this->output->writeln('  <fg=gray>Flags: --format=json | --format=ndjson | --ci | --fail-on=high | --no-image | --all | --path=app,routes</>');
         $this->output->writeln('  <fg=gray>Scope: by default whole codebase (excl. vendor/storage/public/.git) — use --all or choose interactively</>');
+        $this->output->writeln('  <fg=gray>Update: composer update squeak/rat --with-all-dependencies</>');
         $this->output->writeln('');
     }
 

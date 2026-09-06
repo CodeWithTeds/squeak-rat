@@ -145,6 +145,7 @@ def handle_scan(args):
         render_findings_summary(findings)
         print("  \033[90mFlags: --format=json | --format=ndjson | --ci | --fail-on=high | --no-image | --all | --path=app,routes\033[0m")
         print("  \033[90mScope: by default whole codebase (excl. vendor/storage/public/.git) — use --all or choose interactively\033[0m")
+        print("  \033[90mUpdate: composer update squeak/rat --with-all-dependencies\033[0m")
         print()
 
     # machine-readable
