@@ -457,7 +457,7 @@ class Analyzer
 
         foreach ($files as $file) {
             $rel = str_replace($this->projectRoot . '/', '', $file);
-            if (str_starts_with($rel, 'database/') || str_contains($rel, '/database/') || str_contains($rel, '/migrations/') || str_contains($rel, '/seeders/') || str_starts_with($rel, 'resources/') || str_starts_with($rel, 'config/') || str_ends_with($rel, '.blade.php') || str_contains($rel, 'python_rat') || str_contains($rel, 'verify_') || str_contains($rel, 'python_precise')) {
+            if (str_starts_with($rel, 'database/') || str_contains($rel, '/database/') || str_contains($rel, '/migrations/') || str_contains($rel, '/seeders/') || str_starts_with($rel, 'resources/') || str_starts_with($rel, 'config/') || str_ends_with($rel, '.blade.php') || str_starts_with($rel, 'scripts/') || str_contains($rel, '/scripts/') || str_contains($rel, 'python_rat') || str_contains($rel, 'verify_') || str_contains($rel, 'python_precise')) {
                 continue;
             }
             if (str_starts_with($rel, 'tests/') || str_contains($rel, '/tests/') || str_ends_with($rel, 'Test.php') || str_contains($rel, '/Test')) {

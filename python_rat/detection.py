@@ -72,14 +72,14 @@ class AuthorizationAnalyzer:
         return any(p.search(content_clean) for p in SENSITIVE_PATS)
 
 class HiddenBehaviorAnalyzerPrecise:
-    # Precise patterns: require class definitions, not just keyword presence
+    # Precise patterns: require class definitions / queued jobs, not explicit Mail::send (fixed RAT-001/002 false hidden)
     PATTERNS = {
         'observer': re.compile(r'class\s+\w+Observer\b|::observe\s*\(\s*\w+Observer::class', re.I),
         'event': re.compile(r'class\s+\w+Event\b|Event\s*::\s*dispatch', re.I),
         'listener': re.compile(r'class\s+\w+Listener\b', re.I),
         'job': re.compile(r'class\s+\w+Job\b.*ShouldQueue|dispatch\s*\(\s*new\s+\w+Job', re.I | re.S),
-        'notification': re.compile(r'class\s+\w+Notification\b|->\s*notify\s*\(', re.I),
-        'mail': re.compile(r'class\s+\w+Mailable\b|Mail\s*::', re.I),
+        'notification': re.compile(r'class\s+\w+Notification\b', re.I),
+        'mail': re.compile(r'class\s+\w+Mailable\b', re.I),
         'model_event': re.compile(r'::\s*created\b|::\s*updated\b|::\s*saved\b|::\s*deleted\b|booted|observe\s*\(', re.I),
     }
     @staticmethod

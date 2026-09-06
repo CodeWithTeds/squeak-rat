@@ -4,14 +4,14 @@ namespace Rat\Engine\Detection;
 
 class HiddenBehaviorAnalyzer
 {
-    // Precise patterns: require class definitions, not just keyword in comments (fixes RAT-011-014 false positives)
+    // Precise patterns: require class definitions, not explicit Mail::send (fixes RAT-001/002 false hidden)
     public const PATTERNS = [
         'observer' => '/class\s+\w+Observer\b|::observe\s*\(\s*\w+Observer::class/i',
         'event' => '/class\s+\w+Event\b|Event\s*::\s*dispatch/i',
         'listener' => '/class\s+\w+Listener\b/i',
         'job' => '/class\s+\w+Job\b.*ShouldQueue|dispatch\s*\(\s*new\s+\w+Job/i',
-        'notification' => '/class\s+\w+Notification\b|->\s*notify\s*\(/i',
-        'mail' => '/class\s+\w+Mailable\b|Mail\s*::/i',
+        'notification' => '/class\s+\w+Notification\b/i',
+        'mail' => '/class\s+\w+Mailable\b/i',
         'model_event' => '/::\s*created\b|::\s*updated\b|::\s*saved\b|::\s*deleted\b|booted|observe\s*\(/i',
     ];
 

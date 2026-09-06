@@ -437,6 +437,8 @@ class Analyzer:
                 continue
             if rel.startswith("database/") or "/database/" in rel or rel.startswith("resources/") or rel.startswith("config/") or rel.endswith(".blade.php") or "/migrations/" in rel or "/seeders/" in rel or "/factories/" in rel:
                 continue
+            if rel.startswith("scripts/") or "/scripts/" in rel or rel.startswith("scripts"):
+                continue
             try: raw=fp.read_text(errors="ignore")
             except: continue
             if not raw: continue
