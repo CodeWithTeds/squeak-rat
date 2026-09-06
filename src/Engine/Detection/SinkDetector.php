@@ -16,10 +16,9 @@ class SinkDetector
         '/\bunlink\s*\(|\bmkdir\s*\(|\brmdir\s*\(|\brename\s*\(/i' => ['filesystem operation', Severity::HIGH],
         '/include\s*\(|require\s*\(|include_once|require_once/i' => ['file inclusion', Severity::CRITICAL],
 
-        // DB / SQL
+        // DB / SQL — only raw queries are exploitable; parameterized where() with bindings is safe (fixes RAT-005 false positive)
         '/DB\s*::\s*(raw|select|statement|unprepared|insert|update|delete)\s*\(/i' => ['DB::raw', Severity::CRITICAL],
         '/\bwhereRaw\s*\(|\bselectRaw\s*\(|\borderByRaw\s*\(|\bhavingRaw\s*\(/i' => ['Raw SQL', Severity::HIGH],
-        '/\bDB\s*::\s*table\s*\(.*\)\s*->\s*where/i' => ['DB query', Severity::MEDIUM],
 
         // Process / shell
         '/\bexec\s*\(|\bshell_exec\s*\(|\bsystem\s*\(|\bpassthru\s*\(|\bproc_open\s*\(|\bpopen\s*\(/i' => ['shell execution', Severity::CRITICAL],

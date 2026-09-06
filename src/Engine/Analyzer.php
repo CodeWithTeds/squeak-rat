@@ -118,6 +118,20 @@ class Analyzer
         return ['graph' => $graph, 'findings' => $findings, 'stats' => $stats];
     }
 
+    private function stripPhp(string $content): string
+    {
+        // Mirror python_rat/strip.py — remove string literals and comments so detectors don't fire inside them
+        $strings = [];
+        $tmp = preg_replace_callback('/\'(?:\\\\.|[^\'\\\\])*\'|"(?:\\\\.|[^"\\\\])*"/', function($m) use (&$strings) {
+            $strings[] = $m[0];
+            return '__STR' . (count($strings)-1) . '__';
+        }, $content);
+        $tmp = preg_replace('/\/\/.*/', '', $tmp);
+        $tmp = preg_replace('/^\s*#.*/m', '', $tmp);
+        $tmp = preg_replace('/\/\*.*?\*\//s', '', $tmp);
+        return $tmp;
+    }
+
     /** @return Finding[] */
     private function traceDataFlows(ApplicationGraph $graph): array
     {
@@ -130,43 +144,161 @@ class Analyzer
         $counter = 0;
         foreach ($files as $file) {
             $rel = str_replace($this->projectRoot . '/', '', $file);
-            $content = @file_get_contents($file) ?: '';
-            if ($content === '') continue;
+            $raw = @file_get_contents($file) ?: '';
+            if ($raw === '') continue;
+            $clean = $this->stripPhp($raw);
 
-            $sources = SourceDetector::detectInContent($content);
-            $sinks = SinkDetector::detectInContent($content);
+            $sources = SourceDetector::detectInContent($clean);
+            $sinks = SinkDetector::detectInContent($clean);
 
             if (empty($sources) || empty($sinks)) continue;
 
-            // Heuristic: if file contains both source and sink, report potential dangerous flow
-            // Try to correlate via line proximity & variable taint simulation (lightweight)
+            // Build tainted vs sanitized vars (mirrors python_rat/analyzer.py)
+            $taintedVars = [];
+            $sanitizedVars = [];
+            $hasFormRequest = (bool) preg_match('/\b[A-Z][a-zA-Z0-9_]*Request\s+\$request/', $raw);
+            foreach (explode("\n", $clean) as $line) {
+                if (SourceDetector::isSourceLine($line)) {
+                    if (preg_match('/(\$[a-zA-Z_]\w*)\s*=\s*.*(?:\$request|request\s*\()/', $line, $m)) {
+                        $var = $m[1];
+                        if (preg_match('/->\s*(validate|validated|safe|only)\s*\(/i', $line)) {
+                            $sanitizedVars[$var] = true;
+                        } else {
+                            $taintedVars[$var] = true;
+                        }
+                    }
+                    foreach (['$_GET','$_POST','$_REQUEST','$_FILES','$_COOKIE'] as $sup) {
+                        if (str_contains($line, $sup)) $taintedVars[$sup] = true;
+                    }
+                    $taintedVars['$request'] = true;
+                }
+                if (preg_match('/(\$[a-zA-Z_]\w*)\s*=\s*\$request->\s*(safe|validated)\b/', $line, $m2)) {
+                    $sanitizedVars[$m2[1]] = true;
+                }
+                if (preg_match('/(\$[a-zA-Z_]\w*)\s*=\s*\$request->\s*validate\s*\(/', $line, $m3)) {
+                    $sanitizedVars[$m3[1]] = true;
+                }
+                if (preg_match('/(\$[a-zA-Z_]\w*)\s*=\s*\$request->\s*only\s*\(/', $line, $m4)) {
+                    $sanitizedVars[$m4[1]] = true;
+                }
+                if (preg_match('/(\$[a-zA-Z_]\w*)\s*=\s*\$request->\s*(validated|safe)\s*\(/', $line, $m5)) {
+                    $sanitizedVars[$m5[1]] = true;
+                }
+            }
+
             foreach ($sinks as $sink) {
-                $sinkLine = $this->lineForOffset($content, $sink['offset']);
-                $nearestSource = $this->nearestSource($sources, $sink, $content);
+                $sinkLine = $this->lineForOffset($clean, $sink['offset']);
+                // Extract sink line content (both clean and raw)
+                $cleanLines = explode("\n", $clean);
+                $rawLines = explode("\n", $raw);
+                $sinkLineContent = '';
+                $sinkLineRaw = '';
+                $cur = 0;
+                foreach ($cleanLines as $idx => $cl) {
+                    $nxt = $cur + strlen($cl) + 1;
+                    if ($sink['offset'] >= $cur && $sink['offset'] < $nxt) {
+                        $sinkLineContent = $cl;
+                        if (isset($rawLines[$idx])) $sinkLineRaw = $rawLines[$idx];
+                        break;
+                    }
+                    $cur = $nxt;
+                }
 
-                // Confidence based on proximity and variable sharing
-                $confidence = $this->estimateConfidence($content, $sources, $sink);
+                $hasTaint = false;
+                // Dynamic sink special handling
+                if ($sink['sink'] === 'dynamic function call') {
+                    if (preg_match('/\$([a-zA-Z_]\w*)\s*\(\s*\$/', $sinkLineContent, $m)) {
+                        $funcVar = '$' . $m[1];
+                        if (isset($taintedVars[$funcVar])) $hasTaint = true;
+                        else continue;
+                    } else {
+                        if (SourceDetector::isSourceLine($sinkLineContent)) $hasTaint = true;
+                        else continue;
+                    }
+                } elseif ($sink['sink'] === 'dynamic class instantiation') {
+                    if (preg_match('/new\s+(\$[a-zA-Z_]\w*)/', $sinkLineContent, $m) && isset($taintedVars[$m[1]])) {
+                        $hasTaint = true;
+                    } else {
+                        continue;
+                    }
+                } else {
+                    if (SourceDetector::isSourceLine($sinkLineContent) || SourceDetector::isSourceLine($this->stripPhp($sinkLineRaw))) {
+                        $hasTaint = true;
+                    }
+                    if (! $hasTaint) {
+                        foreach (array_keys($taintedVars) as $tv) {
+                            if (str_contains($sinkLineContent, $tv) || ($sinkLineRaw && str_contains($sinkLineRaw, $tv))) {
+                                $hasTaint = true; break;
+                            }
+                        }
+                    }
+                }
+
+                // For mass assignment, extend context for multiline arrays
+                $extendedRaw = $sink['sink'] === 'mass assignment' ? substr($raw, $sink['offset'], 1500) : '';
+                $extendedClean = $sink['sink'] === 'mass assignment' ? substr($clean, $sink['offset'], 1500) : '';
+                if ($sink['sink'] === 'mass assignment' && ! $hasTaint) {
+                    foreach (array_keys($taintedVars) as $tv) {
+                        if (str_contains($extendedRaw, $tv) || str_contains($extendedClean, $tv)) { $hasTaint = true; break; }
+                    }
+                    if (! $hasTaint && SourceDetector::isSourceLine($extendedClean)) $hasTaint = true;
+                    if (! $hasTaint && SourceDetector::isSourceLine($this->stripPhp($extendedRaw))) $hasTaint = true;
+                }
+
+                // Mass assignment precise filtering (fixes RAT-001..003 false positives)
+                if ($sink['sink'] === 'mass assignment') {
+                    foreach (array_keys($sanitizedVars) as $sv) {
+                        if (str_contains($sinkLineContent, $sv) || ($sinkLineRaw && str_contains($sinkLineRaw, $sv)) || str_contains($extendedRaw, $sv) || str_contains($extendedClean, $sv)) {
+                            $hasTaint = false; break;
+                        }
+                    }
+                    if (! $hasTaint) continue;
+                    if ($hasFormRequest && $hasTaint && (preg_match('/\$request->\s*(validated|safe)\b/', $sinkLineContent) || preg_match('/\$request->\s*(validated|safe)\b/', $extendedClean))) {
+                        $hasTaint = false; continue;
+                    }
+                    $combined = ($sinkLineContent ?: '') . ' ' . ($sinkLineRaw ?: '') . ' ' . $extendedRaw . ' ' . $extendedClean;
+                    if (preg_match('/\$request->\s*(only|validated|safe)\s*\(/i', $combined)) {
+                        // allow-list filtered -> not exploitable mass assignment
+                        continue;
+                    }
+                    if (str_contains($combined, '=>')) {
+                        if (!str_contains($combined, '$request->all()') && !str_contains($combined, '$request->all')) {
+                            $lower = strtolower($combined);
+                            $hasSensitive = (bool) preg_match('/is_admin|is_super|branch_id/', $lower);
+                            if (! $hasSensitive) {
+                                continue;
+                            }
+                            $foundSensitiveTainted = false;
+                            if (preg_match('/is_admin.*\$request|status.*\$request|branch_id.*\$request/i', $lower)) {
+                                $foundSensitiveTainted = true;
+                            }
+                            foreach (array_keys($taintedVars) as $tv) {
+                                if (str_contains($combined, $tv) && preg_match('/is_admin|is_super/i', $lower)) {
+                                    $foundSensitiveTainted = true;
+                                }
+                            }
+                            if (! $foundSensitiveTainted) continue;
+                        }
+                    }
+                }
+
+                if (! $hasTaint) continue;
+
+                $nearestSource = $this->nearestSource($sources, $sink, $clean);
+                $confidence = $this->estimateConfidence($clean, $sources, $sink);
                 $severity = $sink['severity'];
-
-                // Bump severity if tainted request directly flows into critical sink without validation visible
-                $hasValidation = (bool) preg_match('/->\s*validate\s*\(|FormRequest|Validator::/i', $content);
+                $hasValidation = (bool) preg_match('/->\s*validate\s*\(|FormRequest|Validator::/i', $clean);
                 if (! $hasValidation && $severity === Severity::CRITICAL) {
                     $confidence = Confidence::HIGH;
                 } elseif ($hasValidation) {
-                    // Lower confidence if validation present — still flag but medium
                     if ($confidence === Confidence::HIGH) $confidence = Confidence::MEDIUM;
                 }
 
-                // Build flow trace: try to infer chain from graph
                 $basename = basename($file, '.php');
-                $type = $this->inferFileType($file);
                 $flow = $this->buildFlow($graph, $file, $basename, $sink['sink'], $nearestSource['snippet'] ?? '$request');
-
                 $entry = $this->inferEntryPoint($graph, $file, $basename);
-
                 $title = sprintf('User input reaches %s', $sink['sink']);
                 $desc = 'User-controlled data reaches a sensitive operation.';
-
                 $why = sprintf(
                     "User-controlled input (%s) reaches %s in %s:%d. No clear security boundary was detected in the immediate path. Review authorization, validation, and sanitization.",
                     $nearestSource['snippet'] ?? 'request input',
@@ -174,9 +306,7 @@ class Analyzer
                     $rel,
                     $sinkLine
                 );
-
                 $recs = $this->recommendationsForSink($sink['sink']);
-
                 $findings[] = new Finding(
                     id: 'RAT-TMP-' . (++$counter),
                     title: $title,
@@ -195,7 +325,6 @@ class Analyzer
                 );
             }
 
-            // Cap findings per file to avoid noise — max 2
             if (count($findings) > 80) break;
         }
 
@@ -229,11 +358,36 @@ class Analyzer
 
         foreach ($files as $file) {
             $rel = str_replace($this->projectRoot . '/', '', $file);
-            $content = @file_get_contents($file) ?: '';
-            if ($content === '') continue;
-
-            // Only analyze controllers/services that look like admin or user-modifying
-            if (! preg_match('/Controller|admin/i', $file) && ! str_contains($content, 'User::')) continue;
+            // Skip infra + CLI-only paths (fixes RAT-006-010: migrations/seeders are CLI not HTTP routes)
+            if (str_starts_with($rel, 'database/') || str_contains($rel, '/database/') || str_contains($rel, '/migrations/') || str_contains($rel, '/seeders/') || str_contains($rel, '/factories/') || str_starts_with($rel, 'resources/') || str_starts_with($rel, 'config/') || str_starts_with($rel, 'storage/') || str_starts_with($rel, 'bootstrap/') || str_starts_with($rel, 'tests/') || str_contains($rel, '/tests/') || str_ends_with($rel, '.blade.php') || str_contains($rel, 'python_rat') || str_contains($rel, 'src/Engine/') || str_contains($rel, 'python_precise') || str_contains($rel, 'verify_')) {
+                continue;
+            }
+            $raw = @file_get_contents($file) ?: '';
+            if ($raw === '') continue;
+            $content = $this->stripPhp($raw);
+            // Precise: file must be a Controller and referenced by a Route (or HTTP-exposed)
+            $isController = str_ends_with($file, 'Controller.php') || str_contains($file, '/Http/Controllers/');
+            if (! $isController) continue;
+            $basename = basename($file, '.php');
+            $isRouted = false;
+            foreach ($graph->nodesByType('Route') as $rn) {
+                if (str_contains((string) ($rn->meta['action'] ?? ''), $basename)) {
+                    $isRouted = true; break;
+                }
+            }
+            if (! $isRouted) {
+                if (count($graph->nodesByType('Route')) > 0) continue;
+                // if 0 routes, fallback: check if controller appears in any route file via content search
+                $routesDir = $this->projectRoot . '/routes';
+                $foundInRoutes = false;
+                if (is_dir($routesDir)) {
+                    foreach (glob($routesDir . '/*.php') ?: [] as $rf) {
+                        $rc = @file_get_contents($rf) ?: '';
+                        if (str_contains($rc, $basename)) { $foundInRoutes = true; break; }
+                    }
+                }
+                if (! $foundInRoutes) continue;
+            }
 
             if (! AuthorizationAnalyzer::isSensitive($content)) continue;
             if (AuthorizationAnalyzer::hasAuthorization($content)) continue;
@@ -256,6 +410,10 @@ class Analyzer
                 }
             }
             if ($hasAuthRoute) continue;
+            // also check if controller itself has auth middleware via $this->middleware or __construct
+            if (preg_match('/middleware.*auth|->middleware.*auth/i', $content)) {
+                continue;
+            }
 
             // Sensitive + no auth
             $entry = $this->inferEntryPoint($graph, $file, $basename);
@@ -299,12 +457,18 @@ class Analyzer
 
         foreach ($files as $file) {
             $rel = str_replace($this->projectRoot . '/', '', $file);
-            $content = @file_get_contents($file) ?: '';
-            if (stripos($file, 'Observer.php') === false && stripos($content, 'Observer') === false) {
-                // Also look for model events
-                if (! HiddenBehaviorAnalyzer::hasHiddenBehavior($content)) continue;
-                // Only flag if graph shows user service touches model with observer listeners
-                if (! str_contains($content, 'User') && ! str_contains($content, 'Order')) continue;
+            if (str_starts_with($rel, 'database/') || str_contains($rel, '/database/') || str_contains($rel, '/migrations/') || str_contains($rel, '/seeders/') || str_starts_with($rel, 'resources/') || str_starts_with($rel, 'config/') || str_ends_with($rel, '.blade.php') || str_contains($rel, 'python_rat') || str_contains($rel, 'verify_') || str_contains($rel, 'python_precise')) {
+                continue;
+            }
+            if (str_starts_with($rel, 'tests/') || str_contains($rel, '/tests/') || str_ends_with($rel, 'Test.php') || str_contains($rel, '/Test')) {
+                continue;
+            }
+            $raw = @file_get_contents($file) ?: '';
+            $clean = $this->stripPhp($raw);
+            if (! HiddenBehaviorAnalyzer::hasHiddenBehavior($clean)) continue;
+            // Precise filter: need real User/Order context or actual observer class
+            if (! str_contains($clean, 'User') && ! str_contains($clean, 'Order')) {
+                if (! str_contains($clean, 'Observer') && ! str_contains($clean, 'Job')) continue;
             }
 
             $basename = basename($file, '.php');
@@ -313,7 +477,7 @@ class Analyzer
             $flow = array_filter([
                 $entry,
                 $basename,
-                $this->pickHiddenTarget($content),
+                $this->pickHiddenTarget($clean),
                 'Job / Event / Notification',
             ]);
 

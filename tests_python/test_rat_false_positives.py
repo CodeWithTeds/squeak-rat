@@ -68,12 +68,19 @@ class TestRatSelfScanIsPureFalse(unittest.TestCase):
         precise = len(SOURCE_RE.findall(clean))
         self.assertEqual(precise, 0, "Clean code should have 0 executable $request->input, naive hit is string literal at Analyzer.php:187")
         self.assertEqual(naive, 1, "Raw naive should see 1 hit (the fallback string)")
-        # Sink line uses $file from collectPhpFiles, not tainted var
+        # Sink line uses $file from collectPhpFiles, not tainted var — find line containing file_get_contents($file)
         lines = raw.splitlines()
-        code = lines[132] if len(lines)>132 else ""  # 1-indexed 133
-        self.assertIn("file_get_contents($file)", code, f"Unexpected code at 133: {code}")
+        code = ""
+        found_line = None
+        for i, l in enumerate(lines, start=1):
+            if "file_get_contents($file)" in l:
+                code = l
+                found_line = i
+                break
+        self.assertTrue(code, "Should find file_get_contents($file) line in Analyzer.php")
+        self.assertIn("file_get_contents($file)", code, f"Unexpected code at {found_line}: {code}")
         self.assertNotIn("$request", code, "Sink line must not contain $request — variable-level taint fails → pure false")
-        print(f"✅ RAT-001 pure false confirmed: cleaner naive={naive} precise={precise} code=`{code.strip()}`")
+        print(f"✅ RAT-001 pure false confirmed: cleaner naive={naive} precise={precise} code=`{code.strip()}` at line {found_line}")
 
     def test_rat_002_auth_is_comment_only(self):
         """RAT-002 FileDiscovery auth missing is comment false positive."""

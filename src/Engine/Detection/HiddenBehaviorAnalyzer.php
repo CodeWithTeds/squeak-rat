@@ -4,14 +4,15 @@ namespace Rat\Engine\Detection;
 
 class HiddenBehaviorAnalyzer
 {
+    // Precise patterns: require class definitions, not just keyword in comments (fixes RAT-011-014 false positives)
     public const PATTERNS = [
-        'observer' => '/Observer/i',
-        'event' => '/event\s*\(|Event\s*::\s*dispatch|dispatch\s*\(.*Event/i',
-        'listener' => '/Listener/i',
-        'job' => '/dispatch\s*\(|Dispatchable|ShouldQueue|Job/i',
-        'notification' => '/Notification|->\s*notify\s*\(/i',
-        'mail' => '/Mailable|Mail\s*::/i',
-        'model_event' => '/::\s*created|::\s*updated|::\s*saved|::\s*deleted|booted|observe/i',
+        'observer' => '/class\s+\w+Observer\b|::observe\s*\(\s*\w+Observer::class/i',
+        'event' => '/class\s+\w+Event\b|Event\s*::\s*dispatch/i',
+        'listener' => '/class\s+\w+Listener\b/i',
+        'job' => '/class\s+\w+Job\b.*ShouldQueue|dispatch\s*\(\s*new\s+\w+Job/i',
+        'notification' => '/class\s+\w+Notification\b|->\s*notify\s*\(/i',
+        'mail' => '/class\s+\w+Mailable\b|Mail\s*::/i',
+        'model_event' => '/::\s*created\b|::\s*updated\b|::\s*saved\b|::\s*deleted\b|booted|observe\s*\(/i',
     ];
 
     /**
