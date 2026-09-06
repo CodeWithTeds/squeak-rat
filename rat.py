@@ -3,19 +3,21 @@
 rat.py — Python-native RAT CLI
 Mirrors PHP RatCommand.php / bin/rat default command but uses Python analyzer (precise, no false positives).
 
-Usage (replaces `php artisan rat` / `php bin/rat`):
-  python3 rat.py                         # interactive chooser (TTY)
-  python3 rat.py --all                   # [all] Whole codebase (all PHP — recommended, respects exclude)
-  python3 rat.py --laravel               # [laravel] Laravel lot (monolith + modular + microservices monorepo)
-  python3 rat.py --security              # [security] Security scan — Vulnerability & attack-surface analysis
-  python3 rat.py --deep                  # [deep] Deep security scan — Advanced data-flow + behavior analysis
-  python3 rat.py --path=app,routes       # [custom] Custom — you type paths
-  python3 rat.py --all --format=json > report.json
-  python3 rat.py --deep --ci --fail-on=high
-  python3 rat.py show RAT-001            # investigate finding (reads last.json)
-  python3 rat.py show --format=json
-  python3 rat.py flow "POST /api/import"
-  python3 rat.py why UserController
+Usage (Laravel package — php artisan delegates to Python precise):
+  php artisan rat                         # interactive chooser (TTY) → Python engine
+  php artisan rat --all                   # [all] Whole codebase (all PHP — recommended, respects exclude)
+  php artisan rat --laravel               # [laravel] Laravel lot
+  php artisan rat --security              # [security] Security scan
+  php artisan rat --deep                  # [deep] Deep security scan
+  php artisan rat --path=app,routes       # [custom] Custom
+  php artisan rat --all --format=json > report.json
+  php artisan rat --deep --ci --fail-on=high
+  php artisan rat:show RAT-001            # investigate finding (reads last.json)
+  php artisan rat:show --format=json
+  php artisan rat:flow "POST /api/import"
+  php artisan rat:why UserController
+  # standalone Python (same engine):
+  python3 rat.py --all  |  python3 vendor/squeak/rat/rat.py --deep
 
 Scope logic exactly mirrors PHP:
   --deep > --security > --all > --laravel > --path > interactive > config/rat.php default
@@ -102,12 +104,12 @@ def render_findings_summary(findings):
     print()
     if findings:
         print("  \033[90mRun:\033[0m")
-        print("    \033[96mpython3 rat.py show\033[0m           \033[90m— list all findings\033[0m")
-        print("    \033[96mpython3 rat.py show RAT-001\033[0m   \033[90m— investigate one\033[0m")
-        print("    \033[96mpython3 rat.py flow \"POST /api/import\"\033[0m \033[90m— trace a route\033[0m")
+        print("    \033[96mphp artisan rat:show\033[0m           \033[90m— list all findings\033[0m")
+        print("    \033[96mphp artisan rat:show RAT-001\033[0m   \033[90m— investigate one\033[0m")
+        print("    \033[96mphp artisan rat:flow \"POST /api/import\"\033[0m \033[90m— trace a route\033[0m")
     else:
         print("  \033[92m✓ No findings — application looks clean (within RAT’s scope).\033[0m")
-        print("  \033[90m  Tip: `python3 rat.py why <Controller>` and `python3 rat.py impact <Model>` for exploration.\033[0m")
+        print("  \033[90m  Tip: `php artisan rat:why <Controller>` and `php artisan rat:impact <Model>` for exploration.\033[0m")
     print()
 
 def handle_scan(args):
@@ -249,7 +251,7 @@ def cmd_show(args):
             print(f"  \033[97m{f.get('title','')}\033[0m")
             if f.get("entry"): print(f"  \033[90m{f.get('entry')}\033[0m")
             if f.get("file"): print(f"  \033[90m{f.get('file')}:{f.get('line','')}\033[0m  \033[90mConfidence:\033[0m \033[97m{f.get('confidence','').upper()}\033[0m")
-            print(f"  \033[90m→\033[0m \033[96mpython3 rat.py show {f.get('id')}\033[0m\n")
+            print(f"  \033[90m→\033[0m \033[96mphp artisan rat:show {f.get('id')}\033[0m\n")
         return 0
     low=str(target).lower()
     if low in ["critical","high","medium","low","info"]:
@@ -273,7 +275,7 @@ def cmd_show(args):
     if not found:
         found=next((f for f in findings if f.get("id","").lower()==str(target).lower()), None)
     if not found:
-        print(f"\033[91m Finding {target} not found. Run `python3 rat.py show` to list all.\033[0m")
+        print(f"\033[91m Finding {target} not found. Run `php artisan rat:show` to list all.\033[0m")
         return 1
     render_banner(with_image=True, compact=False)
     sev=found.get("severity","info").upper()
@@ -378,11 +380,11 @@ def main():
 
     if args.command=="show":
         return cmd_show(args)
-    # add flow/why/impact minimal python versions that reuse load_last + python_rat graph
+    # add flow/why/impact minimal python versions that reuse load_last + python_rat graph (php artisan wrappers)
     if args.command=="flow":
         data=load_last()
         if not data:
-            print("No scan yet — run `python3 rat.py --all` first.")
+            print("No scan yet — run `php artisan rat --all` first.")
             return 1
         # reuse graph file to display
         from python_rat.graph import ApplicationGraph, Node, Edge
@@ -455,7 +457,7 @@ def main():
         return 0
     if args.command in ("why","impact"):
         # delegate to show simple placeholder via graph
-        print(f"`python3 rat.py {args.command}` — Python graph query (read last.json). Run `python3 rat.py --all` first then re-run.")
+        print(f"`php artisan rat:{args.command} {getattr(args,'target','')}` — Python graph query (read last.json). Run `php artisan rat --all` first then re-run.")
         # Implement minimal why/impact via analyzer graph reuse similar to flow
         data=load_last()
         if not data:
