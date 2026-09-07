@@ -1,0 +1,430 @@
+================================================================================
+ RAT INDEPENDENT AUDIT - AIMFS 2026
+ Generated: 2026-09-07T15:55:20+08:00 (RAT run) / 2026-09-07 Audit
+ Tool: squeak/rat ^1.1 (vendor/squeak/rat) - composer.json:32
+ App: laravel/react-starter-kit - laravel/framework ^12.0
+ Routes: 25 | Files: 194 | Graph nodes: 249 edges: 133
+ RAT findings: 16 (0 Critical, 12 High, 4 Medium, 0 Low) - .rat.last.json:37
+ Auditor: Independent manual triage (not just RAT output)
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+Q: Is RAT legit?
+A: YES. squeak/rat ^1.1 is a legitimate local static taint/graph analyzer
+   (MIT, vendor/squeak/rat/composer.json:2, RatServiceProvider.php:24).
+   Provides 8 artisan commands: rat, rat:scan, rat:show, rat:why, rat:flow,
+   rat:impact, rat:baseline, rat:ui. Uses nikic/php-parser, no SaaS, no
+   payload execution. Verified via `php artisan list | grep rat`.
+
+Q: Is RAT accurate?
+A: NO - ~94% false positive on this run. Heuristic is:
+   source = $request->only()/cookie()/input -> sink = mass assignment/fopen/
+   dynamic call/Model::update WITHOUT tracking FormRequest::validated(),
+   Gate/Policy, $fillable allowlists, or distinguishing migrations/providers
+   from HTTP routes. Do NOT block deploy on 12 High alone.
+
+Real Risk: MEDIUM (RAT missed 1 Critical + 1 High business-logic + 3 Medium)
+No RCE, no SQLi (no DB::raw with user input), no Storage path traversal,
+no SSRF reachable. Real issues are authorization/IDOR/business-logic.
+
+--------------------------------------------------------------------------------
+SECTION 1: VERDICT PER RAT FINDING
+--------------------------------------------------------------------------------
+RAT output from `php artisan rat:show` -> php artisan rat:show RAT-00X
+
+[RAT-001] HIGH - User input reaches dynamic function call
+  Location: app/Http/Middleware/HandleAppearance.php:21 Confidence: HIGH
+  RAT claim: $request->cookie() -> dynamic function call
+  VERDICT: FALSE POSITIVE
+  Evidence: HandleAppearance.php:19 is View::share('appearance',
+            $request->cookie('appearance') ?? 'system');
+            HandleAppearance.php:21 is return $next($request); // Closure
+            HandleAppearance.php:18 `Closure(Request):(Response) $next`
+            Not a dynamic callable. Cookie not used as function name.
+            Blade app.blade.php:10 uses {{ $appearance }} (ENT_QUOTES escaped)
+            so no JS breakout today. See AF-05 for missing whitelist.
+  Risk: INFO (0/10)
+
+[RAT-002] HIGH - User input reaches mass assignment
+  Location: app/Http/Controllers/Recipe/RecipeBomController.php:30 Confidence: HIGH
+  Entry: GET recipes Source: $request->only( Sink: mass assignment
+  VERDICT: FALSE POSITIVE
+  Evidence: RecipeBomController.php:20 index uses $request->only(['search',
+            'sort','direction']) for READ ONLY filters -> RecipeBomService::
+            indexData(). Write at RecipeBomController.php:25 store and :32
+            update use $request->validated() via StoreRecipeBomRequest.php:8
+            / UpdateRecipeBomRequest.php:9 (authorize: $this->user()!==null,
+            rules: name,sku,unit,selling_price,image,notes,materials.*).
+            RecipeBomService.php:133-168 normalizeMenuAttributes() whitelists
+            and hardcodes category=DryGoods, supplier=Recipe/BOM, status=Active,
+            is_menu_item=true. Attacker cannot mass-assign current_stock despite
+            InventoryItem.php:17 fillable containing it.
+  Risk: 0/10
+
+[RAT-003] HIGH - User input reaches fopen
+  Location: app/Http/Controllers/Supplier/SupplierController.php:86 Confidence: MEDIUM
+  Entry: GET suppliers/report Source: $request->only( Sink: fopen
+  VERDICT: FALSE POSITIVE
+  Evidence: SupplierController.php:86 fopen('php://output','w') literal.
+            SupplierController.php:83 $filename='supplier-report-'.now()->format(
+            'Ymd-His').'.csv' server-generated, no user filename.
+            Tainted $filters = $request->only([...]) SupplierController.php:135
+            only flows to SupplierRepository.php:92 reportRows()->limit(500)->get()
+            (DB read), not filesystem path. No path traversal, no Storage write.
+  Risk: 0/10
+
+[RAT-004] HIGH - User input reaches mass assignment
+  Location: app/Http/Controllers/Supplier/SupplierController.php:56 Confidence: HIGH
+  Entry: GET suppliers/report
+  VERDICT: FALSE POSITIVE
+  Evidence: SupplierController.php:56-58 update uses $request->validated() via
+            StoreSupplierRequest.php:10 / UpdateSupplierRequest.php:10.
+            Supplier.php:16 fillable matches validated set exactly.
+            Route gated by routes/web.php:65 can:view-admin-only-page (Admin only).
+  Risk: 0/10
+
+[RAT-005] HIGH - User input reaches mass assignment
+  Location: app/Http/Controllers/Inventory/InventoryItemController.php:35 Confidence: HIGH
+  Entry: GET inventory
+  VERDICT: FALSE POSITIVE
+  Evidence: InventoryItemController.php:35-37 update uses $request->validated()
+            (StoreInventoryItemRequest.php:11 / UpdateInventoryItemRequest.php:11).
+            InventoryItemService.php:144-166 normalizeAttributes() discards
+            image, autogenerates sku via nextSku():149, hashed store
+            $image->store('inventory-items','public'):158 (no user filename).
+            InventoryItem.php:17 fillable matches validated.
+  Risk: 0/10
+
+[RAT-006] HIGH - User input reaches mass assignment
+  Location: app/Http/Controllers/Production/ProductionBatchController.php:30 Confidence: HIGH
+  Entry: GET production
+  VERDICT: FALSE POSITIVE
+  Evidence: ProductionBatchController.php:30 validated() via
+            StoreProductionBatchRequest.php:10 / UpdateProductionBatchRequest.php:10
+            (Rule::exists inventory_items where is_menu_item=1).
+            ProductionBatchService.php:168-187 normalizeAttributes whitelists,
+            batch_number autogenerated nextBatchNumber() if empty.
+  Risk: 0/10
+
+[RAT-007] HIGH - User input reaches mass assignment
+  Location: app/Http/Controllers/Staff/StaffController.php:42 Confidence: HIGH
+  Entry: GET staff
+  VERDICT: FALSE POSITIVE
+  Evidence: StaffController.php:42 validated() + StoreStaffRequest.php:16
+            authorize(): role===Admin + UpdateStaffRequest.php:15 same +
+            routes/web.php:65 can:view-admin-only-page group.
+            UserRepository.php:65-84 createStaff/updateStaff force
+            'role'=>Staff ignoring injected role.
+  Risk: 0/10
+
+[RAT-008] HIGH - Potential authorization boundary missing
+  Location: database/migrations/2026_03_28_064654_create_tasks_table.php:1 Confidence: MEDIUM
+  VERDICT: FALSE POSITIVE
+  Evidence: File is Schema::create('tasks'...) migration:16 not HTTP endpoint.
+            RAT graph spurious `Model::update` from Schema string match. RAT
+            itself says `Review manually - RAT cannot prove absence of auth`.
+
+[RAT-009] HIGH - Potential authorization boundary missing
+  Location: app/Providers/FortifyServiceProvider.php:1 Confidence: MEDIUM
+  VERDICT: FALSE POSITIVE
+  Evidence: Provider boot() registers Fortify views/actions, not a route.
+            No model write.
+
+[RAT-010] HIGH - Potential authorization boundary missing
+  Location: app/Repositories/UserRepository.php:1 Confidence: MEDIUM
+  VERDICT: FALSE POSITIVE
+  Evidence: Repository called only from StaffService.php:32,40 which is gated
+            via Store/UpdateStaffRequest Admin check + web.php:65 gate.
+            RAT flagged repo in isolation ignoring controller gate.
+
+[RAT-011] HIGH - Potential authorization boundary missing
+  Location: app/Models/Task.php:1 Confidence: MEDIUM
+  VERDICT: FALSE POSITIVE
+  Evidence: Task.php:13 fillable=[user_id,title,description,status] - model not
+            endpoint. Auth enforced in TaskController.php:45,56,68
+            Gate::authorize('view/update/delete').
+
+[RAT-012] HIGH - Potential authorization boundary missing
+  Location: app/Models/PosOrder.php:1 Confidence: MEDIUM
+  VERDICT: FALSE POSITIVE
+  Evidence: PosOrder.php:16 fillable - orders created only via
+            PosOrderService.php:108 inside DB::transaction + PosController.php:30
+            auth group routes/web.php:29 ['auth','verified'].
+
+[RAT-013] MEDIUM - Hidden side effect via observer / event
+  Location: app/Repositories/TaskRepository.php:1 Confidence: HIGH
+  VERDICT: PARTIAL / INFO (downgrade to LOW)
+  Evidence: Descriptively TRUE - TaskRepository.php:48-49
+            ProcessTaskActivity::dispatch($task,'created') + notify(
+            TaskActivityNotification) and :67-68 on update create hidden async
+            chain. ProcessTaskActivity.php:29 even does self-dispatch
+            handle(TaskActivityLogged):29 recursion bug (ctor arity mismatch -
+            __construct takes 0 args -> ArgumentCountError if queued).
+            But not vuln; Gate propagates via model, notification channel
+            `database` only TaskActivityNotification.php:27.
+
+[RAT-014] MEDIUM - Hidden side effect via observer / event
+  Location: app/Models/User.php:1 Confidence: HIGH
+  VERDICT: FALSE POSITIVE
+  Evidence: User.php:14 uses Notifiable,TwoFactorAuthenticatable but no
+            observer dispatches TaskActivityLogged. Flag due to $user->notify()
+            reachable indirectly. Not hidden model lifecycle.
+
+[RAT-015] MEDIUM - Hidden side effect via observer / event
+  Location: tests/Feature/Auth/VerificationNotificationTest.php:1
+  VERDICT: FALSE POSITIVE - Test file not production.
+
+[RAT-016] MEDIUM - Hidden side effect via observer / event
+  Location: tests/Feature/Auth/PasswordResetTest.php:1
+  VERDICT: FALSE POSITIVE - Test file not production.
+
+Precision: 0/12 High true, 0.5/4 Medium informational. RAT should not block deploy.
+
+--------------------------------------------------------------------------------
+SECTION 2: ADDITIONAL FINDINGS RAT MISSED (Prioritized)
+--------------------------------------------------------------------------------
+
+[CRITICAL] AF-01 - Unauthenticated api/tasks Resource
+  Severity: CRITICAL | Confidence: HIGH | OWASP: A01 Broken Access Control
+  Locations:
+    - routes/api/v1.php:22 Route::apiResource('tasks', TaskController::class)
+    - routes/api/v1.php:15 Route::middleware('auth:sanctum')->group(...)
+    - app/Http/Controllers/Api/TaskController.php:27 index
+    - app/Http/Requests/Api/StoreTaskRequest.php:16 authorize()=>true
+    - app/Http/Requests/Api/UpdateTaskRequest.php:13 authorize()=>true
+    - app/Repositories/BaseRepository.php:23 find(): Model (uses find not findOrFail)
+    - app/Repositories/TaskRepository.php:22 Cache::remember("task_{$id}")
+  Description:
+    apiResource('tasks') is OUTSIDE the auth:sanctum group. StoreTaskRequest
+    and UpdateTaskRequest authorize() return true unconditionally.
+    TaskController.php:27 index does getForUserPaginated($request->user(),10)
+    expecting User but unauthenticated gives null -> 500 type error leaking
+    stack via ApiExceptionHandler.php:31. POST /api/v1/tasks with
+    title,description,status creates via $user->tasks()->create() with null
+    -> 500 but probes existence. show/update/destroy via Gate::authorize
+    but BaseRepository.php:23 uses ->find($id) (not findOrFail) so show with
+    null hits Gate::authorize('view',null) type error 500.
+  Impact: Unauthenticated enumeration, 500 leak, potential creation probe.
+  Fix P0:
+    Move apiResource inside middleware('auth:sanctum') group:
+      Route::middleware('auth:sanctum')->group(function(){
+        Route::post('/logout',...);
+        Route::get('/user',...);
+        Route::apiResource('tasks', TaskController::class);
+      });
+    Change Store/UpdateTaskRequest authorize() to return $this->user()!==null
+    and add Gate for store (create policy). Make TaskRepository find() use
+    findOrFail or handle null.
+  Verify: curl -H "Accept: application/json" http://localhost/api/v1/tasks
+          should be 401 not 500. `php artisan route:list` tasks should show
+          auth:sanctum.
+
+[HIGH] AF-02 - POS Void Authorization & Weak admin_pin
+  Severity: HIGH | Confidence: HIGH | OWASP: A01, A07
+  Locations:
+    - routes/web.php:49 PATCH pos/orders/{posOrder}/void throttle:10,1 only
+    - app/Http/Controllers/Pos/PosController.php:41 void(VoidPosOrderRequest, PosOrder $posOrder)
+    - app/Services/Pos/PosOrderService.php:135 void() / 173 ensureValidAdminPin()
+    - config/auth.php:117 env('POS_ADMIN_PIN')
+    - app/Repositories/Pos/PosOrderRepository.php:72 findPaidForVoid()
+  Description:
+    Route has only throttle:10,1, no can: gate. PosController void uses implicit
+    binding posOrder:id (any PosOrder global scope) -> findPaidForVoid() scoped
+    to status=Paid + lockForUpdate but no user_id/cashier ownership check.
+    Any authenticated staff knowing POS_ADMIN_PIN can void any cashier's order.
+    ensureValidAdminPin() uses plain hash_equals($configuredPin,$adminPin) -
+    PIN in cleartext env, no hash, no per-user, no expiry. 4-digit PIN brute
+    force at 10 req/min ~16h to exhaust (global per IP, not per user). No
+    audit beyond notes='Voided by user #'.$userId. Void does NOT revert
+    PurchaseOrderRepository.php:89 createFromPosOrder() purchase order, causing
+    ledger inconsistency (stock restored but purchase order remains).
+  Impact: Staff can void arbitrary paid orders, financial inconsistency.
+  Fix P0:
+    Add middleware('can:update-operational-record') or abort_unless(role===Admin)
+    to void route. Replace shared POS_ADMIN_PIN with current password
+    confirmation (current_password rule) or per-user hash. If keeping PIN,
+    store hash('sha256',pin) and throttle:3,1 per user. Also void should
+    update/cancel linked purchase order or create compensating entry.
+    Log audit with user id + order + IP.
+
+[MEDIUM] AF-03 - Purchase Order Receipt IDOR / Missing Gate
+  Severity: MEDIUM | Confidence: HIGH | OWASP: A01
+  Locations:
+    - routes/web.php:57 GET purchase-orders/{purchase_order}/receipt
+    - routes/web.php:54 PATCH purchase-orders/{purchase_order}/status (has can:)
+    - app/Http/Controllers/PurchaseOrder/PurchaseOrderController.php:30-39
+  Description:
+    receipt route inside admin group (auth,verified) routes/web.php:29 but
+    NO can: middleware (unlike PATCH .../status:54 which has
+    can:update-operational-record). Controller does find((int)$purchaseOrder)
+    ->findOrFail + Pdf::loadView('receipts.purchase-order',...) -> any staff
+    (or any auth via admin prefix) can enumerate IDs and download PDFs exposing
+    order_number,supplier_name,total_amount,ordered_at. No throttle, no ownership.
+  Fix P1: Add ->middleware('can:update-operational-record') or
+         can:view-admin-only-page to receipt; add throttle.
+
+[MEDIUM] AF-04 - User Over-Permissive fillable
+  Severity: MEDIUM | Confidence: HIGH | OWASP: A03
+  Location: app/Models/User.php:19
+    protected $fillable = ['name','email','password','role','email_verified_at'];
+  Description:
+    Includes role + email_verified_at. Currently mitigated because
+    RegisterRequest + CreateNewUser only validate name,email,password and
+    repositories force role=Staff|Admin (UserRepository.php:83). Defense-in-
+    depth failure: future User::create($request->all()) or
+    fill($request->validated()) with added field leaks, attacker sets role=admin
+    or email_verified_at=now. ProfileController.php:33 fill(validated) safe
+    today but pattern risky.
+  Fix P1: Change to fillable=['name','email','password'] + guarded=['role',
+         'email_verified_at']; force role via repo only. Add test asserting
+         mass assignment of role is ignored.
+
+[MEDIUM] AF-05 - Unvalidated appearance/sidebar_state Cookies (Stored XSS prep + Cache Split)
+  Severity: MEDIUM | Confidence: MEDIUM | OWASP: A03, A05
+  Locations:
+    - bootstrap/app.php:20 encryptCookies(except: ['appearance','sidebar_state'])
+    - app/Http/Middleware/HandleAppearance.php:19 View::share('appearance', $request->cookie('appearance') ?? 'system')
+    - resources/views/app.blade.php:10 const appearance = '{{ $appearance }}'
+    - resources/views/app.blade.php:2 @class(['dark'=>($appearance??'system')=='dark'])
+  Description:
+    Cookies intentionally unencrypted (except) -> attacker tamperable without
+    APP_KEY. HandleAppearance no whitelist. Blade uses {{ }} ENT_QUOTES so
+    not currently XSS (single quote -> &#039;), but future direct echo would
+    reflect attacker string (cookie 4KB) into every SSR response, polluting
+    Vary:Cookie cache and enabling cache-deception. appearance injected as CSS
+    class dark check.
+  Fix P1: Whitelist:
+    $appearance = in_array($cookie,['light','dark','system'],true)?$cookie:'system';
+    Same for HandleInertiaRequests.php:57 sidebar_state. Also validate cookie
+    length max 20.
+
+[MEDIUM] AF-06 - Inconsistent Operational Authorization
+  Severity: MEDIUM | Confidence: MEDIUM
+  Locations:
+    - routes/web.php:33-40 resource inventory/production/recipes only(['index','store','update','destroy'])
+    - routes/web.php:35 middlewareFor('update','can:update-operational-record')
+    - routes/web.php:36 middlewareFor('destroy','can:delete-operational-record')
+    - app/Http/Requests/Inventory/StoreInventoryItemRequest.php:12 authorize()=> $this->user()!==null
+  Description:
+    inventory/production/recipes apply can: only to update/destroy. index/store
+    remain auth,verified only -> staff can POST /admin/inventory /production
+    /recipes create records but not edit/delete. Is this intentional? If not,
+    violates least-privilege. Store*Request authorize() duplicates lack of gate.
+  Fix P1: Decide: either add middlewareFor('store','can:update-operational-record')
+         or keep but document that staff may create; unify Store*Request
+         authorize() to Gate::allows('update-operational-record').
+
+[LOW] AF-07 - Weak UpdateTaskRequest Validation
+  Severity: LOW | Confidence: HIGH
+  Locations:
+    - app/Http/Requests/Api/UpdateTaskRequest.php:25-29 status => 'sometimes|required'
+    - app/Http/Requests/Api/StoreTaskRequest.php:30 status => Rule::enum(TaskStatus::class)
+    - app/Models/Task.php:13 fillable status column
+  Description:
+    Update allows arbitrary status string via BaseRepository.php:34 update() ->
+    Task status column freeform (DB default TaskStatus::default()). Business-
+    logic corruption, enum bypass.
+  Fix P2: Add Rule::enum(TaskStatus::class) to UpdateTaskRequest.
+
+[LOW] AF-08 - Inventory Stock Adjustment Race & Negative-Cap
+  Severity: LOW | Confidence: MEDIUM
+  Locations:
+    - app/Repositories/Inventory/InventoryItemRepository.php:120-125 adjustCurrentStock()
+    - app/Repositories/Pos/PosOrderRepository.php:33 sellableProductsForCheckout() uses lockForUpdate
+  Description:
+    adjustCurrentStock() does max(0, stock+delta) + save() outside DB
+    lockForUpdate (except POS checkout uses lockForUpdate). Concurrent voids/
+    production completions can race leading to oversell or lost update.
+  Fix P2: Wrap adjustCurrentStock in DB::transaction + select for update
+         (lockForUpdate) similar to checkout. Consider DB::raw('current_stock + ?').
+
+[INFO] AF-09 - ProcessTaskActivity Job Self-Recursion
+  Severity: INFO | Confidence: HIGH
+  Locations:
+    - app/Jobs/ProcessTaskActivity.php:24-30 handle(TaskActivityLogged $event)
+    - app/Jobs/ProcessTaskActivity.php:29 self::dispatch($task,$action)
+  Description:
+    handle() dispatches self::dispatch($task,$action) but __construct() takes
+    0 args -> runtime ArgumentCountError if queue runs. Dead code path not
+    security but indicates untested hidden behavior RAT flagged as RAT-013.
+  Fix P2: Remove self-dispatch or fix ctor signature.
+
+--------------------------------------------------------------------------------
+SECTION 3: PRIORITIZED FIXES
+--------------------------------------------------------------------------------
+P0 (24h - block release):
+  1. routes/api/v1.php:15-22 move apiResource('tasks') inside auth:sanctum group;
+     fix Store/UpdateTaskRequest authorize(), use findOrFail.
+  2. PosController.php:49 + PosOrderService.php:135 add can: gate to void;
+     replace shared POS_ADMIN_PIN with password confirmation or hashed PIN;
+     increase throttle to 3,1 per user; fix purchase order revert on void.
+
+P1 (This sprint):
+  3. routes/web.php:57 add can: to receipt + throttle.
+  4. app/Models/User.php:19 change fillable to ['name','email','password'].
+  5. HandleAppearance.php:19 + HandleInertiaRequests.php:57 whitelist cookies.
+  6. routes/web.php:33-40 decide store gate; unify Store*Request authorize().
+
+P2 (Hardening):
+  7. UpdateTaskRequest.php:25 add Rule::enum(TaskStatus).
+  8. PurchaseOrderRepository.php:89 consider separate PO- sequence vs POS number.
+  9. InventoryItemRepository.php:120 add lockForUpdate transaction.
+ 10. Remove/fix ProcessTaskActivity self-dispatch.
+
+--------------------------------------------------------------------------------
+SECTION 4: RAT USAGE RECOMMENDATIONS
+--------------------------------------------------------------------------------
+- RAT is useful as pre-deploy checklist but NOT as gate: 0/12 High were true.
+  Do NOT use `rat --ci --fail-on=high` without baseline.
+- After fixing AF-01..AF-05, run: php artisan rat:baseline --update
+  to snapshot remaining Info findings so CI only fails on NEW High.
+- Useful RAT commands for this codebase:
+    php artisan rat:show RAT-001 --no-image
+    php artisan rat:why HandleAppearance
+    php artisan rat:flow "GET suppliers/report" --depth=12
+    php artisan rat:impact User.php
+    php artisan rat --deep --format=json > rat-report.json
+- Keep squueak/rat as require-dev only (already in composer.json:32).
+- Complement RAT with: `composer audit`, `php artisan route:list`,
+  `grep -rn "fillable" app/Models`, `grep -rn "authorize" app/Http/Requests`
+
+--------------------------------------------------------------------------------
+SECTION 5: VERIFICATION STEPS
+--------------------------------------------------------------------------------
+1. Re-run: php artisan route:list | grep tasks
+   Expect: tasks routes show middleware auth:sanctum
+2. curl -H "Accept: application/json" http://localhost/api/v1/tasks
+   Expect: 401 { message: Unauthenticated } not 500
+3. curl with auth token + POST /api/v1/tasks with valid payload -> 201
+4. Test void: POST /pos/orders/{id}/void as staff without PIN -> 403/422
+5. Test receipt: GET /purchase-orders/1/receipt as non-admin staff -> 403
+6. Check fillable: grep -A2 fillable app/Models/User.php == ['name','email','password']
+7. Re-run RAT: php artisan rat --deep --no-image
+   Expect: AF-01..AF-03 should no longer be flagged as auth missing if fixed;
+           previous 12 High should be baselined.
+
+--------------------------------------------------------------------------------
+APPENDIX: FILE REFERENCES
+--------------------------------------------------------------------------------
+.routes/web.php:29 auth,verified admin group
+.routes/api/v1.php:22 apiResource outside auth
+.app/Models/User.php:19 fillable
+.app/Http/Middleware/HandleAppearance.php:19-21 cookie handling
+.bootstrap/app.php:20 encryptCookies except
+.app/Repositories/BaseRepository.php:23 find() not findOrFail
+.app/Repositories/TaskRepository.php:22-48 caching + dispatch
+.app/Services/Pos/PosOrderService.php:173 ensureValidAdminPin
+.app/Http/Controllers/Api/TaskController.php:27 index with $request->user()
+.config/auth.php:117 POS_ADMIN_PIN env
+.rat.last.json:46 full RAT graph (249 nodes, 133 edges)
+
+================================================================================
+ END OF REPORT
+================================================================================
+ Notes:
+ - This is an independent triage, not RAT output. RAT findings are heuristic;
+   always verify manually per file:line above.
+ - For questions: run `php artisan rat:show <ID>` and compare with Section 1.
+ - Owner: Prof Alex / TE-AD - squeak/rat MIT
+================================================================================

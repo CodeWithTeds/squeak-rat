@@ -1,0 +1,380 @@
+================================================================================
+ RAT FALSE POSITIVES - AIMFS 2026
+ Tool: squeak/rat ^1.1 (vendor/squeak/rat) - composer.json:32
+ Run: 2026-09-07T15:55:20+08:00 | Command: php artisan rat:show
+ Raw stats: 16 findings (0 Critical, 12 High, 4 Medium) - .rat.last.json:37
+ Verdict: 12/12 HIGH are FALSE POSITIVE, 3.5/4 MEDIUM are FALSE POSITIVE
+ Precision: 0% HIGH true | 12.5% overall (0.5/16 partial info)
+================================================================================
+HOW TO USE THIS FILE
+--------------------
+This file lists every RAT finding that is NOT a real vulnerability.
+For each ID: RAT claim -> why it flagged -> evidence file:line -> real risk 0/10
+Compare with: php artisan rat:show RAT-00X
+Full audit (including real findings): RAT-AUDIT-2026-09-07.txt
+Missed findings (real issues): RAT-MISSED-FINDINGS-2026-09-07.txt
+================================================================================
+
+
+--------------------------------------------------------------------------------
+[RAT-001] HIGH | Confidence: HIGH | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       User input reaches dynamic function call
+RAT Location:    app/Http/Middleware/HandleAppearance.php:21
+RAT Entry:       HandleAppearance
+RAT Source:      $request->cookie(
+RAT Sink:        dynamic function call
+RAT Flow:        HTTP Request -> HandleAppearance -> dynamic function call
+RAT Why:         User-controlled input ($request->cookie() reaches dynamic
+                 function call in app/Http/Middleware/HandleAppearance.php:21.
+                 No clear security boundary was detected.
+
+WHY FALSE POSITIVE:
+  Actual code HandleAppearance.php:19:
+    View::share('appearance', $request->cookie('appearance') ?? 'system');
+  HandleAppearance.php:21 is:
+    return $next($request);
+  HandleAppearance.php:18 signature: handle(Request $request, Closure(Request):(Response) $next)
+  $next is framework Closure, NOT user-controlled function name. No call_user_func,
+  no $$var(), no eval. RAT misclassified $next($request) as "dynamic function call".
+
+  Cookie value flows to Blade app.blade.php:10:
+    const appearance = '{{ $appearance }}'
+  Blade {{ }} escapes via htmlspecialchars ENT_QUOTES ( ' -> &#039; ), so
+  even "'><svg onload=alert(1)>" cannot break out. Also app.blade.php:2:
+    @class(['dark'=>($appearance??'system')=='dark'])
+
+  Bootstrap: bootstrap/app.php:20 encryptCookies(except: ['appearance','sidebar_state'])
+  So cookie is tamperable, but not executable.
+
+REAL RISK: 0/10 (not exploitable). See AF-05 for low hardening: whitelist
+  $appearance to ['light','dark','system'] to prevent cache-split.
+
+FIX: Optional hardening HandleAppearance.php:19:
+  $appearance = $request->cookie('appearance');
+  $appearance = in_array($appearance, ['light','dark','system'], true) ? $appearance : 'system';
+  View::share('appearance', $appearance);
+
+COMMAND TO VERIFY:
+  php artisan rat:show RAT-001 --no-image
+  cat app/Http/Middleware/HandleAppearance.php
+
+
+--------------------------------------------------------------------------------
+[RAT-002] HIGH | Confidence: HIGH | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       User input reaches mass assignment
+RAT Location:    app/Http/Controllers/Recipe/RecipeBomController.php:30
+RAT Entry:       GET recipes  Source: $request->only(  Sink: mass assignment
+RAT Flow: HTTP Request -> DELETE/PATCH/PUT/POST/GET recipes -> RecipeBomController -> mass assignment
+
+WHY FALSE POSITIVE:
+  Line 30 is UPDATE, not index:
+    RecipeBomController.php:30  public function update(UpdateRecipeBomRequest $request, string $recipe)
+    RecipeBomController.php:32    $this->recipeBomService->update((int) $recipe, $request->validated());
+
+  RAT traces $request->only() but that is ONLY on line 20 for READ:
+    RecipeBomController.php:20  public function index(Request $request): Response
+    RecipeBomController.php:20    return Inertia::render('recipes/index', $this->recipeBomService->indexData($request->only(['search', 'sort', 'direction'])));
+
+  Write paths use $request->validated() via FormRequest allowlist:
+    StoreRecipeBomRequest.php:8  authorize(): $this->user()!==null
+    StoreRecipeBomRequest.php:12 rules: name, sku, unit, selling_price, image, notes, materials.* (materials.*.inventory_item_id, quantity)
+    UpdateRecipeBomRequest.php:9 same
+
+  Service whitelist RecipeBomService.php:133-168 normalizeMenuAttributes():
+    whitelists name, sku, unit, selling_price, notes, materials
+    hardcodes category=DryGoods, supplier=Recipe/BOM, status=Active, is_menu_item=true
+    attacker cannot mass-assign current_stock, reorder_point despite InventoryItem.php:17 fillable containing them.
+
+  Route gated: routes/web.php:29 ['auth','verified'] prefix admin + web.php:60 resource recipes with can:update-operational-record on update/destroy.
+
+REAL RISK: 0/10
+COMMAND: php artisan rat:show RAT-002; cat app/Http/Requests/Recipe/StoreRecipeBomRequest.php
+
+
+--------------------------------------------------------------------------------
+[RAT-003] HIGH | Confidence: MEDIUM | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       User input reaches fopen
+RAT Location:    app/Http/Controllers/Supplier/SupplierController.php:86
+RAT Entry:       GET suppliers/report  Source: $request->only(  Sink: fopen
+
+WHY FALSE POSITIVE:
+  Code SupplierController.php:83-86:
+    $filters = $this->filters($request); // $request->only(['search','category',...]) :135
+    $rows = $this->suppliers->reportRows($filters);
+    $filename = 'supplier-report-'.now()->format('Ymd-His').'.csv'; // server-generated, no user input
+
+    return response()->streamDownload(function () use ($rows): void {
+        $output = fopen('php://output', 'w'); // literal, NOT user path
+        if ($output === false) return;
+        fputcsv($output, ['Code','Supplier',...]);
+        foreach ($rows as $supplier) { fputcsv(...); }
+        fclose($output);
+    }, $filename, ['Content-Type'=>'text/csv']);
+
+  Tainted $filters only flows to DB query:
+    SupplierRepository.php:92 reportRows() -> ->limit(500)->get() (read)
+  No Storage::put with user filename, no path traversal, no file upload.
+
+  If RAT meant CSV injection: fputcsv does not sanitize =,+,-,@ but Excel CSV injection requires user data in supplier fields (which are admin-created, not direct user upload).
+
+REAL RISK: 0/10
+COMMAND: php artisan rat:show RAT-003; cat app/Http/Controllers/Supplier/SupplierController.php | sed -n '79,127p'
+
+
+--------------------------------------------------------------------------------
+[RAT-004] HIGH | Confidence: HIGH | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       User input reaches mass assignment
+RAT Location:    app/Http/Controllers/Supplier/SupplierController.php:56
+RAT Entry:       GET suppliers/report
+
+WHY FALSE POSITIVE:
+  Line 56 is update():
+    SupplierController.php:56 public function update(UpdateSupplierRequest $request, string $supplier)
+    SupplierController.php:58   $attributes = $request->validated();
+    SupplierController.php:64   $this->suppliers->update($supplierModel, $attributes);
+
+  Uses validated() via StoreSupplierRequest.php:10 / UpdateSupplierRequest.php:10
+  Rules match Supplier.php:16 fillable exactly:
+    fillable=[code,name,category,contact_person,phone,email,city,address,payment_terms,lead_time_days,rating,status,notes]
+
+  Gated by routes/web.php:65 can:view-admin-only-page (Admin only) group covering suppliers resource :68 and report :66.
+
+REAL RISK: 0/10
+
+
+--------------------------------------------------------------------------------
+[RAT-005] HIGH | Confidence: HIGH | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       User input reaches mass assignment
+RAT Location:    app/Http/Controllers/Inventory/InventoryItemController.php:35
+RAT Entry:       GET inventory
+
+WHY FALSE POSITIVE:
+  Line 35 is update():
+    InventoryItemController.php:35 public function update(UpdateInventoryItemRequest $request, string $inventory)
+    InventoryItemController.php:37   $this->inventoryItemService->update((int) $inventory, $request->validated());
+
+  Index line 20 uses only() for read:
+    InventoryItemController.php:20 indexData($request->only(['search','category','status','stock_state','storage_area','sort','direction']))
+
+  Store uses validated():
+    StoreInventoryItemRequest.php:11 / UpdateInventoryItemRequest.php:11
+
+  Service InventoryItemService.php:144-166 normalizeAttributes():
+    discards image from attributes, autogenerates sku via nextSku():149 if empty,
+    sets defaults daily_usage_rate, lead_time_days, hashed store $image->store('inventory-items','public'):158 (no user filename)
+    InventoryItem.php:17 fillable matches validated set.
+
+REAL RISK: 0/10
+
+
+--------------------------------------------------------------------------------
+[RAT-006] HIGH | Confidence: HIGH | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       User input reaches mass assignment
+RAT Location:    app/Http/Controllers/Production/ProductionBatchController.php:30
+RAT Entry:       GET production
+
+WHY FALSE POSITIVE:
+  Line 30 update():
+    ProductionBatchController.php:30 public function update(UpdateProductionBatchRequest $request, string $production)
+    ProductionBatchController.php:32   $this->productionBatchService->update((int) $production, $request->validated());
+
+  Index line 20: ProductionBatchController.php:20 indexData($request->only([...])) read-only.
+
+  Request StoreProductionBatchRequest.php:10 / UpdateProductionBatchRequest.php:10:
+    Rule::exists('inventory_items','id')->where('is_menu_item',1)
+    batch_number autogenerated nextBatchNumber() if empty ProductionBatchService.php:168-187 normalizeAttributes whitelist.
+
+REAL RISK: 0/10
+
+
+--------------------------------------------------------------------------------
+[RAT-007] HIGH | Confidence: HIGH | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       User input reaches mass assignment
+RAT Location:    app/Http/Controllers/Staff/StaffController.php:42
+RAT Entry:       GET staff
+
+WHY FALSE POSITIVE:
+  Line 42 update():
+    StaffController.php:42 public function update(UpdateStaffRequest $request, string $staff)
+    StaffController.php:44   $this->staff->update((int) $staff, $request->validated());
+
+  Gated:
+    routes/web.php:65 can:view-admin-only-page group covering staff resource :76
+    StoreStaffRequest.php:16 authorize(): $this->user()?->role === UserRole::Admin
+    UpdateStaffRequest.php:15 same
+    StaffController.php:23 index abort_unless(role===Admin,403)
+    StaffController.php:51 destroy abort_unless(role===Admin,403)
+
+  Repo forces role:
+    UserRepository.php:65-84 createStaff/updateStaff: 'role'=>UserRole::Staff ignoring injected role
+
+  So even if attacker sends role=admin in payload, validated() does not contain role, and repo overwrites.
+
+REAL RISK: 0/10
+
+
+--------------------------------------------------------------------------------
+[RAT-008] HIGH | Confidence: MEDIUM | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       Potential authorization boundary missing
+RAT Location:    database/migrations/2026_03_28_064654_create_tasks_table.php:1
+RAT Flow:        HTTP Request -> 2026_03_28_064654_create_tasks_table -> Schema -> Model::update
+
+WHY FALSE POSITIVE:
+  File is migration, NOT HTTP endpoint:
+    2026_03_28_064654_create_tasks_table.php:16 Schema::create('tasks', function(Blueprint $table){...})
+  No Route, no Controller, no Request. RAT graph incorrectly matched string "Model::update" from Schema word.
+  RAT itself says: "Review manually — RAT cannot prove absence of auth" .rat.last.json:253
+
+REAL RISK: 0/10
+
+
+--------------------------------------------------------------------------------
+[RAT-009] HIGH | Confidence: MEDIUM | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       Potential authorization boundary missing
+RAT Location:    app/Providers/FortifyServiceProvider.php:1
+
+WHY FALSE POSITIVE:
+  File is ServiceProvider boot():
+    FortifyServiceProvider.php:18 public function boot(): void { Fortify::createUsersUsing(CreateNewUser::class); ... }
+  Registers Fortify views/actions, not a route. No model write reachable via HTTP without going through Fortify controller which has its own auth/throttle.
+
+REAL RISK: 0/10
+
+
+--------------------------------------------------------------------------------
+[RAT-010] HIGH | Confidence: MEDIUM | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       Potential authorization boundary missing
+RAT Location:    app/Repositories/UserRepository.php:1
+
+WHY FALSE POSITIVE:
+  File is repository, not endpoint. Called only from StaffService.php:32,40 which is gated via Store/UpdateStaffRequest Admin check + routes/web.php:65 can:view-admin-only-page.
+  RAT flagged repo in isolation ignoring upstream controller gate. Every repo has Model::create/update by design.
+
+REAL RISK: 0/10
+
+
+--------------------------------------------------------------------------------
+[RAT-011] HIGH | Confidence: MEDIUM | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       Potential authorization boundary missing
+RAT Location:    app/Models/Task.php:1
+
+WHY FALSE POSITIVE:
+  File is Model:
+    Task.php:13 fillable=[user_id,title,description,status]
+  Model not endpoint. Auth enforced in Api\TaskController.php:45,56,68 Gate::authorize('view/update/delete', $task) via TaskPolicy.
+  RAT flagged because Model has fillable and uses HasFactory.
+
+REAL RISK: 0/10
+
+
+--------------------------------------------------------------------------------
+[RAT-012] HIGH | Confidence: MEDIUM | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       Potential authorization boundary missing
+RAT Location:    app/Models/PosOrder.php:1
+
+WHY FALSE POSITIVE:
+  File is Model:
+    PosOrder.php:16 fillable order fields
+  Orders created only via PosOrderService.php:108 inside DB::transaction + PosController.php:30 auth group routes/web.php:29 ['auth','verified'] prefix admin.
+  RAT graph posOrder identical to Task.
+
+REAL RISK: 0/10
+
+
+--------------------------------------------------------------------------------
+[RAT-013] MEDIUM | Confidence: HIGH | PARTIAL / INFO (downgrade to LOW)
+--------------------------------------------------------------------------------
+RAT Title:       Hidden side effect via observer / event
+RAT Location:    app/Repositories/TaskRepository.php:1
+
+WHY PARTIAL:
+  Descriptively TRUE but not a vulnerability:
+    TaskRepository.php:48 ProcessTaskActivity::dispatch($task,'created');
+    TaskRepository.php:49 $user->notify(new TaskActivityNotification($task,'created'));
+    TaskRepository.php:67 same on update
+    ProcessTaskActivity.php:29 handle(TaskActivityLogged $event) even does self-dispatch (bug: ctor takes 0 args -> ArgumentCountError if queued)
+    TaskActivityNotification.php:27 via database channel only
+
+  RAT flagged as "hidden behavior" correctly, but severity MEDIUM overblown.
+  Gate propagates via model, notification to $model->user only, not broadcast.
+  Should be INFO for documentation, not a security finding.
+
+REAL RISK: INFO (not vuln). Exists but expected by design.
+
+
+--------------------------------------------------------------------------------
+[RAT-014] MEDIUM | Confidence: HIGH | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       Hidden side effect via observer / event
+RAT Location:    app/Models/User.php:1
+
+WHY FALSE POSITIVE:
+  User.php:14 uses HasApiTokens, HasFactory, Notifiable, TwoFactorAuthenticatable
+  No observer dispatches TaskActivityLogged. Flag due to $user->notify() reachable indirectly via TaskRepository, not a hidden model lifecycle.
+  User has no booted() observer, no dispatch.
+
+REAL RISK: 0/10
+
+
+--------------------------------------------------------------------------------
+[RAT-015] MEDIUM | Confidence: HIGH | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       Hidden side effect via observer / event
+RAT Location:    tests/Feature/Auth/VerificationNotificationTest.php:1
+
+WHY FALSE POSITIVE:
+  File is test, not production:
+    tests/Feature/Auth/VerificationNotificationTest.php:1
+  Tests intentionally trigger notifications. Not a prod hidden behavior.
+
+REAL RISK: 0/10
+
+
+--------------------------------------------------------------------------------
+[RAT-016] MEDIUM | Confidence: HIGH | FALSE POSITIVE
+--------------------------------------------------------------------------------
+RAT Title:       Hidden side effect via observer / event
+RAT Location:    tests/Feature/Auth/PasswordResetTest.php:1
+
+WHY FALSE POSITIVE:
+  Same as RAT-015, test file.
+
+REAL RISK: 0/10
+
+
+================================================================================
+SUMMARY
+================================================================================
+Total RAT findings: 16
+False Positive:     15.5 (96.9%)
+  - HIGH: 12/12 FP (100%)
+  - MEDIUM: 3.5/4 FP (RAT-013 partial info)
+True/Info:        0.5 (RAT-013 info, not vuln)
+
+Top patterns RAT misses:
+  - FormRequest validated() vs only() distinction
+  - Gate/Policy/ can: middleware upstream
+  - Migration/Provider vs Route namespace
+  - Literal 'php://output' vs user file path
+  - $fillable matching validated set
+
+Recommendation:
+  Do NOT use `rat --ci --fail-on=high` without baseline.
+  After triage, run: php artisan rat:baseline --update
+  Then CI only fails on NEW High.
+
+Full audit: RAT-AUDIT-2026-09-07.txt
+Real findings: RAT-MISSED-FINDINGS-2026-09-07.txt
+================================================================================

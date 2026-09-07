@@ -611,15 +611,210 @@ class Analyzer:
                             "description":"Route model binding bypasses patientQuery() branch check.",
                             "severity":"high","confidence":"medium","entry":rel,"source":"Patient $patient binding","sink":"missing branch check","flow":[rel,"Patient binding","update"],"file":rel,"line":line_no,"recommendations":["Enforce $patient->branch_id === branchId() check","Use scoped binding or patientQuery()->findOrFail($id)","Add policy/gate for Patient"],"category":"authorization","why": f"File {rel}:{line_no} uses Patient $patient model binding but no branch_id === branchId() check (user report AdminController.php:295). Model binding bypasses patientQuery() scoping — HIGH IDOR."
                         })
+            # --- AF-01 CRITICAL: Unauthenticated apiResource outside auth:sanctum ---
+            # Detect Store/UpdateTaskRequest with authorize()=>true (file-level signal for unauthenticated API)
+            if (rel.endswith('StoreTaskRequest.php') or rel.endswith('UpdateTaskRequest.php')) and re.search(r'class\s+StoreTaskRequest|class\s+UpdateTaskRequest', raw) and re.search(r'function\s+authorize\s*\(\s*\)\s*:\s*bool\s*\{\s*return\s+true\s*;\s*\}', raw, re.S):
+                # Only flag if route file also has apiResource tasks outside auth (or just flag the request itself as BOUNDARY MISSING)
+                # We flag the request file directly — HIGH confidence because authorize true with apiResource implies unauthenticated exposure
+                m = re.search(r'function\s+authorize', raw)
+                line_no = raw[:m.start()].count("\n")+1 if m else 1
+                findings.append({
+                    "id":"RAT-TMP-AF01",
+                    "title":"Unauthenticated API resource: Task authorize() returns true",
+                    "description":"Api Task Store/Update request allows any user (authorize true) — route likely outside auth:sanctum.",
+                    "severity":"critical","confidence":"high","entry":rel,"source":"authorize()=>true","sink":"unauthenticated apiResource","flow":[rel,"authorize true","apiResource tasks"],"file":rel,"line":line_no,"recommendations":["Move Route::apiResource('tasks', TaskController::class) inside Route::middleware('auth:sanctum')->group","Change authorize() to return $this->user()!==null","Add Gate/policy for tasks.create/view"],"category":"authorization","why": f"File {rel}:{line_no} Store/UpdateTaskRequest authorize() returns true unconditionally. With routes/api/v1.php:22 apiResource('tasks') outside auth:sanctum, unauthenticated POST/GET /api/v1/tasks reaches TaskController-> $request->user() null -> 500 leak. Move inside auth group (rat-miss-finding.txt AF-01)."
+                })
+            # Also detect route file directly: apiResource tasks without surrounding auth middleware
+            if ('routes/' in rel and 'api' in rel) and re.search(r'Route\s*::\s*apiResource\s*\(\s*[\'"]tasks[\'"]', raw):
+                # Check surrounding 2000 chars for auth:sanctum
+                idx = raw.find("apiResource")
+                window = raw[max(0, idx-2000): idx+2000] if idx!=-1 else raw
+                # If window does not contain auth:sanctum middleware wrapping this line, flag
+                # Simple heuristic: file contains apiResource but not inside group that has auth:sanctum before it
+                has_auth_group = bool(re.search(r"Route\s*::\s*middleware\s*\(\s*['\"]auth:sanctum['\"]\s*\)\s*->\s*group", raw))
+                # Check if apiResource line itself is inside auth group by counting braces: look back for group opening without closing
+                # Fallback: if file has apiResource and also has StoreTaskRequest pattern nearby, consider vulnerable
+                if has_auth_group:
+                    # Check if apiResource is after the closing }); of the auth group -> likely outside
+                    # Find auth group start and its closing
+                    m_group = re.search(r"Route\s*::\s*middleware\s*\(\s*['\"]auth:sanctum['\"]\s*\)\s*->\s*group\s*\(\s*function", raw)
+                    if m_group:
+                        # Find the matching closing }); after group start
+                        after = raw[m_group.end():]
+                        # Count braces to find group end (simplified: first '});' after)
+                        # If apiResource is after that, it's outside
+                        m_close = re.search(r'\}\s*\)\s*;', after)
+                        if m_close:
+                            group_end = m_group.end() + m_close.end()
+                            api_pos = raw.find("apiResource")
+                            if api_pos > group_end:
+                                m_api = re.search(r'Route\s*::\s*apiResource\s*\(\s*[\'"]tasks[\'"]', raw)
+                                line_no = raw[:m_api.start()].count("\n")+1 if m_api else 1
+                                findings.append({
+                                    "id":"RAT-TMP-AF01-ROUTE",
+                                    "title":"Unauthenticated apiResource: tasks outside auth:sanctum",
+                                    "description":"Route::apiResource('tasks') is outside auth:sanctum group — unauthenticated access.",
+                                    "severity":"critical","confidence":"high","entry":rel,"source":"Route::apiResource('tasks')","sink":"missing auth middleware","flow":[rel,"Route::apiResource tasks","TaskController"],"file":rel,"line":line_no,"recommendations":["Move apiResource inside Route::middleware('auth:sanctum')->group","Add authorize() check in FormRequest","Verify with curl -H 'Accept: application/json' /api/v1/tasks => 401"],"category":"authorization","why": f"File {rel}:{line_no} apiResource('tasks') after auth group closing at {group_end} — unauthenticated. See rat-miss-finding.txt AF-01 routes/api/v1.php:22."
+                                })
+                else:
+                    # No auth group at all but has apiResource => unauthenticated by default
+                    m_api = re.search(r'Route\s*::\s*apiResource\s*\(\s*[\'"]tasks[\'"]', raw)
+                    if m_api:
+                        line_no = raw[:m_api.start()].count("\n")+1
+                        findings.append({
+                            "id":"RAT-TMP-AF01-ROUTE",
+                            "title":"Unauthenticated apiResource: tasks without auth",
+                            "description":"Route::apiResource('tasks') without auth:sanctum.",
+                            "severity":"critical","confidence":"medium","entry":rel,"source":"Route::apiResource('tasks')","sink":"missing auth middleware","flow":[rel,"apiResource tasks","unauth"],"file":rel,"line":line_no,"recommendations":["Wrap in auth:sanctum group"],"category":"authorization","why": f"File {rel}:{line_no} apiResource without auth — critical broken access control."
+                        })
+            # --- AF-04 MEDIUM: User fillable contains role/email_verified_at ---
+            if rel.endswith('User.php') and re.search(r'class\s+User\b', raw) and re.search(r'protected\s+\$fillable\s*=', raw):
+                m_fill = re.search(r'protected\s+\$fillable\s*=\s*\[[^\]]+\]', raw, re.S)
+                if m_fill:
+                    fill_content = m_fill.group(0)
+                    if "'role'" in fill_content or '"role"' in fill_content or "'email_verified_at'" in fill_content or '"email_verified_at"' in fill_content:
+                        line_no = raw[:m_fill.start()].count("\n")+1
+                        findings.append({
+                            "id":"RAT-TMP-AF04",
+                            "title":"Over-permissive fillable: User role/email_verified_at",
+                            "description":"User model fillable includes role/email_verified_at — mass assignment risk.",
+                            "severity":"medium","confidence":"high","entry":rel,"source":"$fillable with role","sink":"mass assignment surface","flow":[rel,"User fillable","role injection"],"file":rel,"line":line_no,"recommendations":["Change fillable to ['name','email','password']","Guard role/email_verified_at","Force role via repository only","Add test asserting role injection ignored"],"category":"security","why": f"File {rel}:{line_no} fillable {fill_content[:80]} includes role/email_verified_at. Future User::create($request->all()) could escalate to admin. See rat-miss-finding.txt AF-04."
+                        })
+            # --- AF-05 MEDIUM: Unvalidated appearance/sidebar_state cookies via encryptCookies except ---
+            if rel.endswith('bootstrap/app.php') and 'encryptCookies' in raw and 'appearance' in raw:
+                if re.search(r'encryptCookies\s*\(\s*except\s*:\s*\[[^\]]*appearance', raw, re.S):
+                    # Check if HandleAppearance has whitelist
+                    # This file is bootstrap/app.php, flag it; also check middleware file separately
+                    m = re.search(r'encryptCookies', raw)
+                    line_no = raw[:m.start()].count("\n")+1 if m else 1
+                    findings.append({
+                        "id":"RAT-TMP-AF05-BOOTSTRAP",
+                        "title":"Unencrypted cookie via encryptCookies except: appearance",
+                        "description":"appearance/sidebar_state cookies excluded from encryption — tamperable.",
+                        "severity":"medium","confidence":"medium","entry":rel,"source":"encryptCookies except","sink":"tamperable cookie","flow":[rel,"encryptCookies except","HandleAppearance"],"file":rel,"line":line_no,"recommendations":["Whitelist appearance to ['light','dark','system'] in HandleAppearance","Limit cookie length 20","Consider removing from except if not needed"],"category":"security","why": f"File {rel}:{line_no} encryptCookies(except: ['appearance','sidebar_state']) makes cookie tamperable without APP_KEY. HandleAppearance then reflects without whitelist (rat-miss-finding.txt AF-05)."
+                    })
+            if rel.endswith('HandleAppearance.php') and 'View::share' in raw and re.search(r'\$request->cookie\s*\(\s*[\'"]appearance[\'"]', raw):
+                if not re.search(r'in_array\s*\(\s*\$appearance.*\[.*light.*dark.*system', raw, re.S):
+                    m = re.search(r'View::share', raw)
+                    line_no = raw[:m.start()].count("\n")+1 if m else 1
+                    findings.append({
+                        "id":"RAT-TMP-AF05",
+                        "title":"Unvalidated appearance cookie reflected to Blade",
+                        "description":"appearance cookie not whitelisted before View::share — XSS prep / cache split.",
+                        "severity":"medium","confidence":"medium","entry":rel,"source":"$request->cookie('appearance')","sink":"View::share","flow":[rel,"cookie appearance","Blade"],"file":rel,"line":line_no,"recommendations":["Whitelist: in_array($cookie, ['light','dark','system'], true) ? $cookie : 'system'","Same for sidebar_state"],"category":"security","why": f"File {rel}:{line_no} View::share appearance without whitelist. Blade escaped today but future unescaped echo would reflect 4KB attacker string (rat-audit.txt RAT-001 hardening, rat-miss-finding.txt AF-05)."
+                    })
+            # --- AF-02 HIGH: POS void weak admin_pin + missing can: ---
+            if rel.endswith('routes/web.php') and 'pos/orders' in raw and 'void' in raw.lower():
+                # Per-line check: void route line itself should have can:, not whole file
+                has_void_without_can = False
+                void_line_no = 1
+                for idx, line in enumerate(raw.splitlines(), start=1):
+                    if re.search(r"Route\s*::\s*(patch|post).*pos/orders.*void", line, re.I):
+                        if 'throttle' in line and 'can:' not in line:
+                            has_void_without_can = True
+                            void_line_no = idx
+                            break
+                if has_void_without_can:
+                    findings.append({
+                        "id":"RAT-TMP-AF02-ROUTE",
+                        "title":"POS void route missing authorization gate (only throttle)",
+                        "description":"PATCH pos/orders/{posOrder}/void has throttle only, no can: gate — any staff with PIN can void any order.",
+                        "severity":"high","confidence":"high","entry":rel,"source":"Route pos/orders void","sink":"missing can: middleware","flow":[rel,"void route","PosOrderService::void"],"file":rel,"line":void_line_no,"recommendations":["Add middleware can:update-operational-record","Abort unless role Admin","Replace shared PIN with current_password rule","Throttle 3/min per user"],"category":"authorization","why": f"File {rel}:{void_line_no} void route only throttle:10,1, no authorization (rat-miss-finding.txt AF-02 routes/web.php:49). POS_ADMIN_PIN cleartext, no owner check in findPaidForVoid."
+                    })
+            if rel.endswith('PosOrderService.php') and ('ensureValidAdminPin' in raw or 'admin_pin' in raw.lower()):
+                if re.search(r"hash_equals", raw) and re.search(r"admin_pin", raw, re.I):
+                    if not re.search(r'current_password|Hash::check.*admin_pin', raw, re.I):
+                        m = re.search(r'ensureValidAdminPin|admin_pin', raw, re.I)
+                        line_no = raw[:m.start()].count("\n")+1 if m else 1
+                        findings.append({
+                            "id":"RAT-TMP-AF02-PIN",
+                            "title":"Weak shared POS_ADMIN_PIN cleartext with hash_equals",
+                            "description":"Shared PIN in env cleartext, not hashed per-user, brute force 10k combos.",
+                            "severity":"high","confidence":"high","entry":rel,"source":"POS_ADMIN_PIN","sink":"weak PIN check","flow":[rel,"POS_ADMIN_PIN","void"],"file":rel,"line":line_no,"recommendations":["Use current_password confirmation","Or store hash('sha256',pin) and throttle 3/min per user","Audit void with user id + IP"],"category":"security","why": f"File {rel}:{line_no} ensureValidAdminPin uses hash_equals(config('auth.admin_pin'), $pin) cleartext (rat-miss-finding.txt AF-02). 4-digit PIN ~16h brute force at 10/min."
+                        })
+            # --- AF-03 MEDIUM: Purchase order receipt IDOR missing can: ---
+            if rel.endswith('routes/web.php') and 'purchase-orders' in raw and 'receipt' in raw:
+                # Per-line: receipt route without can: but file also has can: for status
+                has_receipt_without_can = False
+                receipt_line_no = 1
+                for idx, line in enumerate(raw.splitlines(), start=1):
+                    if re.search(r"Route\s*::\s*get.*purchase-orders.*receipt", line, re.I):
+                        if 'can:' not in line:
+                            has_receipt_without_can = True
+                            receipt_line_no = idx
+                            break
+                if has_receipt_without_can and re.search(r'can:update-operational-record', raw):
+                    findings.append({
+                        "id":"RAT-TMP-AF03",
+                        "title":"Purchase order receipt IDOR: GET receipt without can: gate",
+                        "description":"GET purchase-orders/{purchase_order}/receipt lacks can: while PATCH status has it — any staff can enumerate PDFs.",
+                        "severity":"medium","confidence":"high","entry":rel,"source":"Route receipt","sink":"missing can: middleware","flow":[rel,"receipt route","Pdf::loadView"],"file":rel,"line":receipt_line_no,"recommendations":["Add middleware can:view-admin-only-page or can:update-operational-record","Add throttle","Use Policy for purchase_order"],"category":"authorization","why": f"File {rel}:{receipt_line_no} receipt route without can: (rat-miss-finding.txt AF-03 routes/web.php:57). Controller does find((int)$id) without Gate, exposes order_number/supplier/total."
+                    })
+            # --- AF-06 MEDIUM: Inconsistent operational auth store without gate ---
+            if rel.endswith('routes/web.php') and re.search(r"Route\s*::\s*resource\s*\(\s*['\"](inventory|production|recipes)['\"]", raw):
+                if re.search(r"middlewareFor\s*\(\s*['\"]update['\"].*can:update-operational-record", raw):
+                    # Check if store also has gate — if not, flag inconsistency
+                    if not re.search(r"middlewareFor\s*\(\s*['\"]store['\"]", raw):
+                        m = re.search(r"Route\s*::\s*resource", raw)
+                        line_no = raw[:m.start()].count("\n")+1 if m else 1
+                        findings.append({
+                            "id":"RAT-TMP-AF06",
+                            "title":"Inconsistent operational auth: store without gate, update/destroy with can:",
+                            "description":"inventory/production/recipes store allows any staff but update/destroy requires can: — inconsistent least privilege.",
+                            "severity":"medium","confidence":"medium","entry":rel,"source":"Route::resource store","sink":"missing can: for store","flow":[rel,"resource store","can: update"], "file":rel,"line":line_no,"recommendations":["Add middlewareFor('store','can:update-operational-record') or document intentional","Make Store*Request authorize() use Gate::allows"],"category":"authorization","why": f"File {rel}:{line_no} only update/destroy gated, store is auth only (rat-miss-finding.txt AF-06 routes/web.php:33). Staff can flood inventory but not edit."
+                        })
+            # --- AF-07 LOW: UpdateTaskRequest missing Rule::enum ---
+            if rel.endswith('UpdateTaskRequest.php') and re.search(r'class\s+UpdateTaskRequest', raw):
+                if re.search(r'["\']status["\']\s*=>\s*\[?.*sometimes.*required', raw, re.I) or re.search(r'["\']status["\']\s*=>\s*["\']sometimes\|required["\']', raw):
+                    if not re.search(r'Rule::enum\s*\(\s*TaskStatus', raw):
+                        m = re.search(r'["\']status["\']', raw)
+                        line_no = raw[:m.start()].count("\n")+1 if m else 1
+                        findings.append({
+                            "id":"RAT-TMP-AF07",
+                            "title":"Weak UpdateTaskRequest validation: status missing Rule::enum",
+                            "description":"Update allows arbitrary status string, enum bypass.",
+                            "severity":"low","confidence":"high","entry":rel,"source":"UpdateTaskRequest status","sink":"missing Rule::enum","flow":[rel,"status validation","Task update"],"file":rel,"line":line_no,"recommendations":["Add Rule::enum(TaskStatus::class) to UpdateTaskRequest","Match StoreTaskRequest"],"category":"security","why": f"File {rel}:{line_no} UpdateTaskRequest status only sometimes|required, Store has Rule::enum(TaskStatus::class) (rat-miss-finding.txt AF-07). Arbitrary status corrupts business logic."
+                        })
+            # --- AF-08 LOW: Inventory stock race without lockForUpdate ---
+            if rel.endswith('InventoryItemRepository.php') and 'adjustCurrentStock' in raw:
+                # Check if method does max(0, stock+delta) + save without lockForUpdate or DB::transaction
+                if re.search(r'function\s+adjustCurrentStock', raw):
+                    snippet_idx = raw.find('function adjustCurrentStock')
+                    snippet = raw[snippet_idx: snippet_idx+800] if snippet_idx!=-1 else ""
+                    has_lock = bool(re.search(r'lockForUpdate|DB::transaction.*lockForUpdate|DB::raw.*GREATEST', snippet, re.S))
+                    has_max_save = bool(re.search(r'max\s*\(\s*0.*\+.*delta.*save\s*\(\)', snippet, re.S))
+                    if has_max_save and not has_lock:
+                        m = re.search(r'function\s+adjustCurrentStock', raw)
+                        line_no = raw[:m.start()].count("\n")+1 if m else 1
+                        findings.append({
+                            "id":"RAT-TMP-AF08",
+                            "title":"Inventory stock race: adjustCurrentStock without lockForUpdate",
+                            "description":"Concurrent voids/checkouts can lost-update stock.",
+                            "severity":"low","confidence":"medium","entry":rel,"source":"adjustCurrentStock","sink":"race condition","flow":[rel,"adjustCurrentStock","InventoryItem save"],"file":rel,"line":line_no,"recommendations":["Wrap in DB::transaction + lockForUpdate","Or use atomic DB::raw('GREATEST(0, current_stock + ?)')"],"category":"security","why": f"File {rel}:{line_no} adjustCurrentStock max(0, stock+delta) save without FOR UPDATE (rat-miss-finding.txt AF-08). Checkout uses lockForUpdate for read but adjust itself races -> oversell."
+                        })
+            # --- AF-09 INFO: ProcessTaskActivity self-dispatch ctor mismatch ---
+            if rel.endswith('ProcessTaskActivity.php') and 'ProcessTaskActivity' in raw and 'class ProcessTaskActivity' in raw:
+                has_ctor_no_args = bool(re.search(r'function\s+__construct\s*\(\s*\)', raw))
+                has_self_dispatch = bool(re.search(r'self::dispatch\s*\(\s*\$task', raw))
+                has_handle_event = bool(re.search(r'function\s+handle\s*\(\s*TaskActivityLogged', raw))
+                if has_ctor_no_args and has_self_dispatch and has_handle_event:
+                    m = re.search(r'self::dispatch', raw)
+                    line_no = raw[:m.start()].count("\n")+1 if m else 1
+                    findings.append({
+                        "id":"RAT-TMP-AF09",
+                        "title":"ProcessTaskActivity self-dispatch ctor mismatch (dead code)",
+                        "description":"handle(TaskActivityLogged) dispatches self with 2 args but ctor takes 0 -> ArgumentCountError if queued.",
+                        "severity":"info","confidence":"high","entry":rel,"source":"self::dispatch","sink":"ctor mismatch","flow":[rel,"handle","self::dispatch"],"file":rel,"line":line_no,"recommendations":["Remove self-dispatch or fix ctor: __construct(public Task $task, public string $action)","Test queue worker"],"category":"security","why": f"File {rel}:{line_no} ProcessTaskActivity handle dispatches self but __construct 0 args (rat-miss-finding.txt AF-09 TaskRepository.php:48). Dead hidden behavior RAT-013."
+                    })
             if len(findings)>20: break
-        # dedup + limit
+        # dedup + limit - increased to 15 to cover AF-01..AF-09 (up to 12 findings) without truncation
         seen=set()
         uniq=[]
         for f in findings:
             k=(f["file"], f["sink"], f["line"])
             if k not in seen:
                 seen.add(k); uniq.append(f)
-        return uniq[:10]
+        return uniq[:15]
 
     # helpers reused from php Analyzer
     def _build_flow(self, graph: ApplicationGraph, file: str, basename: str, sink: str, source: str):

@@ -1,0 +1,482 @@
+================================================================================
+ RAT MISSED FINDINGS - AIMFS 2026 (REAL ISSUES RAT DID NOT FLAG)
+ Tool: squeak/rat ^1.1 missed these - Manual audit 2026-09-07
+ App: AIMFS 2026 - laravel/framework ^12.0 - routes: 25
+================================================================================
+HOW TO USE
+--------------------
+RAT reported 16 findings but 0/12 HIGH were true. This file lists 9 REAL
+issues RAT MISSED, prioritized by severity. Each has file:line, description,
+impact, and fix snippet.
+Compare: RAT-FALSE-POSITIVES-2026-09-07.txt (what RAT flagged incorrectly)
+Full audit: RAT-AUDIT-2026-09-07.txt
+================================================================================
+
+
+--------------------------------------------------------------------------------
+[CRITICAL] AF-01 - Unauthenticated api/tasks Resource
+--------------------------------------------------------------------------------
+Severity:    CRITICAL | Confidence: HIGH | OWASP: A01 Broken Access Control
+Locations:
+  routes/api/v1.php:22          Route::apiResource('tasks', TaskController::class)
+  routes/api/v1.php:15          Route::middleware('auth:sanctum')->group(...)
+  app/Http/Controllers/Api/TaskController.php:27  index()
+  app/Http/Controllers/Api/TaskController.php:36  store()
+  app/Http/Controllers/Api/TaskController.php:42  show()
+  app/Http/Controllers/Api/TaskController.php:54  update()
+  app/Http/Controllers/Api/TaskController.php:66  destroy()
+  app/Http/Requests/Api/StoreTaskRequest.php:16   authorize()=>true
+  app/Http/Requests/Api/UpdateTaskRequest.php:13  authorize()=>true
+  app/Repositories/BaseRepository.php:23          find(): Model uses find not findOrFail
+  app/Repositories/TaskRepository.php:22          Cache::remember("task_{$id}")
+  app/Exceptions/ApiExceptionHandler.php:31
+
+Description:
+  routes/api/v1.php:12-22:
+    Route::post('/login', [AuthController::class, 'login']);
+    Route::post('/register', [AuthController::class, 'register']);
+    Route::middleware('auth:sanctum')->group(function () {
+        Route::post('/logout', ...);
+        Route::get('/user', ...);
+    });
+    Route::apiResource('tasks', TaskController::class); // OUTSIDE auth!
+
+  - StoreTaskRequest.php:16 and UpdateTaskRequest.php:13 both:
+      public function authorize(): bool { return true; }
+    No auth check.
+
+  - TaskController.php:27:
+      public function index(Request $request) {
+          $tasks = $this->taskRepository->getForUserPaginated($request->user(), 10);
+      }
+    $request->user() is null when unauthenticated -> TaskRepository.php:29
+    getForUserPaginated(User $user) expects User typehint -> TypeError 500
+    leaking stack trace via ApiExceptionHandler.php:31.
+
+  - TaskController.php:36 store():
+      $task = $this->taskRepository->createForUser($request->user(), $request->validated());
+    Same null user -> 500 but still validates payload, probes existence.
+
+  - TaskController.php:42 show():
+      $task = $this->taskRepository->find($id); // BaseRepository.php:23 -> $this->model->find($id) can return null
+      Gate::authorize('view', $task); // Gate with null -> TypeError 500 vs 403
+
+  Impact:
+    Unauthenticated GET /api/v1/tasks?page=1 -> 500 stack leak
+    POST /api/v1/tasks with {title,description,status} -> 500 but allows enumeration
+    IDOR probe via sequential IDs
+
+  Fix P0 (24h):
+    // routes/api/v1.php
+    Route::middleware('auth:sanctum')->group(function () {
+        Route::post('/logout', [AuthController::class, 'logout']);
+        Route::get('/user', function (Request $request) { return $request->user(); });
+        Route::apiResource('tasks', TaskController::class); // MOVE INSIDE
+    });
+
+    // app/Http/Requests/Api/StoreTaskRequest.php:16
+    public function authorize(): bool { return $this->user() !== null; }
+    // same for UpdateTaskRequest.php:13
+
+    // app/Repositories/BaseRepository.php:23 or TaskRepository.php:22
+    public function find(mixed $id): Model { return $this->model->findOrFail($id); }
+
+  Verify:
+    curl -H "Accept: application/json" http://localhost:8000/api/v1/tasks
+    Expect: 401 { "message": "Unauthenticated." } not 500
+    php artisan route:list | grep tasks -> should show middleware auth:sanctum
+    php artisan test --filter=Task (add test for unauth 401)
+
+  RAT Why Missed: RAT graph saw HTTP Request -> TaskController but did not check
+  that Route was outside auth middleware group; saw authorize()=>true but not
+  that it was outside group.
+
+
+--------------------------------------------------------------------------------
+[HIGH] AF-02 - POS Void Authorization & Weak admin_pin
+--------------------------------------------------------------------------------
+Severity:    HIGH | Confidence: HIGH | OWASP: A01, A07
+Locations:
+  routes/web.php:49               PATCH pos/orders/{posOrder}/void throttle:10,1 only
+  app/Http/Controllers/Pos/PosController.php:41  void(VoidPosOrderRequest $request, PosOrder $posOrder)
+  app/Http/Requests/Pos/VoidPosOrderRequest.php
+  app/Services/Pos/PosOrderService.php:135  void()
+  app/Services/Pos/PosOrderService.php:173  ensureValidAdminPin()
+  config/auth.php:117             'admin_pin' => env('POS_ADMIN_PIN')
+  app/Repositories/Pos/PosOrderRepository.php:72  findPaidForVoid()
+  app/Repositories/PurchaseOrder/PurchaseOrderRepository.php:89  createFromPosOrder()
+
+Description:
+  Route routes/web.php:49:
+    Route::patch('pos/orders/{posOrder}/void', [PosController::class, 'void'])
+        ->middleware('throttle:10,1')->name('pos.orders.void');
+  ONLY throttle, no can: gate, no role check.
+
+  Controller PosController.php:41:
+    public function void(VoidPosOrderRequest $request, PosOrder $posOrder) {
+        $this->posOrderService->void($posOrder->id, (string)$request->validated('admin_pin'), (int)$request->user()->id);
+    }
+  Implicit binding PosOrder $posOrder resolves by id global scope (any order).
+
+  Service PosOrderService.php:139-157:
+    return DB::transaction(function () use ($orderId, $userId) {
+        $order = $this->posOrderRepository->findPaidForVoid($orderId); // scoped to status=Paid + lockForUpdate but NO user_id check
+        foreach ($order->items as $item) { adjustCurrentStock(+quantity); }
+        $this->posOrderRepository->void($order, 'Voided by user #'.$userId.' on '.now());
+    });
+
+  PIN check PosOrderService.php:173:
+    private function ensureValidAdminPin(string $adminPin): void {
+        $configuredPin = config('auth.admin_pin'); // env('POS_ADMIN_PIN') cleartext
+        if (!hash_equals($configuredPin, $adminPin)) throw ValidationException...
+    }
+  - PIN is shared cleartext in .env, not hashed, no per-user, no expiry.
+  - 4-digit PIN => 10,000 combos. Throttle 10 req/min global per IP => ~16h to brute force.
+  - Any authenticated staff (route inside ['auth','verified'] prefix admin :29) who knows PIN can void any cashier's paid order.
+
+  Ledger inconsistency:
+    PosOrderService.php:126 $purchaseOrder = $purchaseOrderRepository->createFromPosOrder($order);
+    Void does NOT revert purchase order PurchaseOrderRepository.php:89 (still exists as if order completed). Stock restored but purchase order remains -> double accounting.
+
+  Impact:
+    Staff voids arbitrary paid orders, stock manipulation, financial mismatch.
+
+  Fix P0:
+    // routes/web.php:49
+    Route::patch('pos/orders/{posOrder}/void', [PosController::class, 'void'])
+        ->middleware(['throttle:3,1', 'can:update-operational-record'])
+        // or ->middleware('throttle:3,1')->can('update-operational-record') and add Gate check in controller
+        ->name('pos.orders.void');
+
+    // Or in PosController.php:41 void()
+    abort_unless($request->user()->role === UserRole::Admin, 403);
+
+    // Replace PIN: use current_password rule
+    // VoidPosOrderRequest.php rules: 'admin_pin' => 'required|current_password'
+    // Remove ensureValidAdminPin entirely. If keeping PIN, store hashed:
+    // config/auth.php: 'admin_pin_hash' => env('POS_ADMIN_PIN_HASH') // hash('sha256', pin)
+    // check hash_equals($hash, hash('sha256', $adminPin)) and throttle per user
+
+    // Fix ledger: void should also void purchase order
+    // PurchaseOrderRepository: add ->voidByPosOrder($order) update status to voided
+
+  Verify:
+    As staff (non-admin) POST void -> 403
+    As admin with wrong PIN -> 422
+    Throttle after 3 fails -> 429
+    After void, purchase_orders status is voided/cancelled
+
+  RAT Why Missed: RAT saw throttle middleware and considered it a security boundary; did not check that PIN is shared cleartext or that findPaidForVoid lacks owner check or ledger revert.
+
+
+--------------------------------------------------------------------------------
+[MEDIUM] AF-03 - Purchase Order Receipt IDOR / Missing Gate
+--------------------------------------------------------------------------------
+Severity:    MEDIUM | Confidence: HIGH | OWASP: A01
+Locations:
+  routes/web.php:57  GET purchase-orders/{purchase_order}/receipt
+  routes/web.php:54  PATCH purchase-orders/{purchase_order}/status -> can:update-operational-record
+  app/Http/Controllers/PurchaseOrder/PurchaseOrderController.php:30-39
+
+Description:
+  Both routes inside admin group ['auth','verified'] :29
+    :54 PATCH .../status ->middleware('can:update-operational-record') // protected
+    :57 GET .../receipt  -> NO middleware at all   // unprotected
+    :52 GET purchase-orders index -> no can: but list is ok
+
+  Controller PurchaseOrderController.php:30:
+    public function receipt(string $purchase_order) {
+        $po = $this->purchaseOrders->find((int)$purchase_order); // no Gate
+        return Pdf::loadView('receipts.purchase-order', ['order'=>$po])->download(...);
+    }
+  Any authenticated user (including staff who should not see admin-only receipts) can enumerate IDs (1,2,3...) and download PDFs exposing order_number, supplier_name, total_amount, ordered_at, items.
+
+  No throttle, no ownership, sequential integer IDs.
+
+  Impact: Information disclosure, receipt forgery prep.
+
+  Fix P1:
+    // routes/web.php:57
+    Route::get('purchase-orders/{purchase_order}/receipt', [PurchaseOrderController::class, 'receipt'])
+        ->middleware(['can:view-admin-only-page', 'throttle:60,1'])
+        ->name('purchase-orders.receipt');
+    // or ->can('view', 'purchase_order') with Policy
+
+  Verify:
+    As staff GET /admin/purchase-orders/1/receipt -> 403 if not admin
+    php artisan route:list | grep receipt -> shows can:
+
+  RAT Why Missed: RAT flagged same file as mass-assignment false positive but did not check that receipt route lacks can: vs status route which has it.
+
+
+--------------------------------------------------------------------------------
+[MEDIUM] AF-04 - User Over-Permissive fillable
+--------------------------------------------------------------------------------
+Severity:    MEDIUM | Confidence: HIGH | OWASP: A03 Injection (Mass Assignment)
+Location:    app/Models/User.php:19
+  protected $fillable = ['name','email','password','role','email_verified_at'];
+
+Description:
+  Includes role + email_verified_at.
+
+  Current mitigations (why not exploitable TODAY):
+    - CreateNewUser.php:22 / RegisterRequest only validate name,email,password
+    - UserRepository.php:83 createStaff: ['role'=>UserRole::Staff] forced, ignores input role
+    - ProfileController.php:33 fill($request->validated()) only validated has name,email
+
+  Defense-in-depth failure:
+    Future code doing User::create($request->all()) or $user->fill($request->validated()) where validated accidentally includes role (if rules add role), or a new endpoint forgets to force role, attacker can set role=admin or email_verified_at=now() to bypass verification.
+
+  Example future vuln:
+    // if someone adds to UpdateStaffRequest rules: 'role' => 'sometimes|string'
+    $user->update($request->validated()); // now role injected!
+
+  Impact: Privilege escalation (low today, high if code evolves).
+
+  Fix P1:
+    // app/Models/User.php:19
+    protected $fillable = ['name', 'email', 'password'];
+    protected $guarded = ['role', 'email_verified_at', 'is_admin'];
+
+    // Keep role assignment only via repository:
+    // UserRepository.php:83 'role'=>UserRole::Staff // already correct
+
+    // Add test:
+    // tests/Feature/Staff/CreateStaffTest.php: assert role injection ignored
+
+  Verify:
+    grep -n fillable app/Models/User.php -> should NOT contain role
+
+  RAT Why Missed: RAT flagged User.php:1 as auth missing (wrong reason) but not as mass-assignment risk; its mass-assignment detector only looks at $request->only() -> Model::create flow, not static fillable array.
+
+
+--------------------------------------------------------------------------------
+[MEDIUM] AF-05 - Unvalidated appearance/sidebar_state Cookies (Cache Split + Future XSS)
+--------------------------------------------------------------------------------
+Severity:    MEDIUM | Confidence: MEDIUM | OWASP: A03, A05
+Locations:
+  bootstrap/app.php:20            encryptCookies(except: ['appearance','sidebar_state'])
+  app/Http/Middleware/HandleAppearance.php:19  View::share('appearance', $request->cookie('appearance') ?? 'system')
+  app/Http/Middleware/HandleInertiaRequests.php:57  sidebar_state cookie
+  resources/views/app.blade.php:10  const appearance = '{{ $appearance }}'
+  resources/views/app.blade.php:2   @class(['dark'=>($appearance??'system')=='dark'])
+
+Description:
+  Cookies intentionally unencrypted -> attacker can tamper without APP_KEY:
+    bootstrap/app.php:20 $middleware->encryptCookies(except: ['appearance','sidebar_state']);
+
+  Middleware HandleAppearance.php:19 no whitelist:
+    View::share('appearance', $request->cookie('appearance') ?? 'system');
+  Any string up to 4KB (cookie limit) reflected into every SSR response.
+
+  Current Blade is safe because {{ }} escapes via htmlspecialchars ENT_QUOTES:
+    app.blade.php:10 const appearance = '{{ $appearance }}' -> ' -> &#039;
+    So "'><svg onload=alert(1)>" becomes "&#039;&gt;&lt;svg..." cannot break.
+
+  Risks if not fixed:
+    - Future {!! $appearance !!} or echo $appearance directly -> stored XSS prep
+    - apperance used in @class dark check; arbitrary long string pollutes Vary:Cookie cache, cache-deception (CDN caches per appearance value)
+    - Large cookie bloats every response (4KB * every page)
+
+  Fix P1:
+    // app/Http/Middleware/HandleAppearance.php:19
+    public function handle(Request $request, Closure $next): Response {
+        $appearance = $request->cookie('appearance');
+        $appearance = in_array($appearance, ['light','dark','system'], true) ? $appearance : 'system';
+        View::share('appearance', $appearance);
+        return $next($request);
+    }
+    // Same for HandleInertiaRequests.php sidebar_state: whitelist ['expanded','collapsed']
+
+    // Optional: limit cookie length max 20 via middleware
+
+  Verify:
+    curl -H "Cookie: appearance=dark" http://localhost/admin/dashboard -> dark class
+    curl -H "Cookie: appearance=<script>" -> still system, not reflected as script
+    Check response HTML does not contain <script
+
+  RAT Why Missed: RAT flagged as dynamic call (wrong sink) but did not suggest whitelist fix; confidence HIGH but description generic.
+
+
+--------------------------------------------------------------------------------
+[MEDIUM] AF-06 - Inconsistent Operational Authorization
+--------------------------------------------------------------------------------
+Severity:    MEDIUM | Confidence: MEDIUM | OWASP: A01
+Locations:
+  routes/web.php:33-40
+    Route::resource('inventory', InventoryItemController::class)->only(['index','store','update','destroy'])
+        ->middlewareFor('update', 'can:update-operational-record')
+        ->middlewareFor('destroy', 'can:delete-operational-record');
+    // same for production :37, recipes :60
+  app/Http/Requests/Inventory/StoreInventoryItemRequest.php:12  authorize()=> $this->user()!==null
+  app/Http/Requests/Inventory/UpdateInventoryItemRequest.php similar
+
+Description:
+  update/destroy require can:update-operational-record / delete-operational-record (policy gate)
+  index/store require ONLY ['auth','verified'] (any staff can create but not edit/delete).
+
+  Is this intentional? If least-privilege intended, staff should not create inventory/production/recipes either. If staff should create, then update should also be allowed for own creations, but gate blocks all staff.
+
+  Example: Staff A can POST /admin/inventory with SKU, name, price -> creates item, but cannot PATCH /admin/inventory/1 to fix typo -> must ask admin.
+
+  Store*Request authorize() duplicates lack of gate: just checks user !== null, not Gate.
+
+  Impact: Either over-permissive (staff can flood inventory) or under-permissive (staff cannot correct). Inconsistent UX/security boundary.
+
+  Fix P1 (choose one and document):
+    Option A (least privilege): add store gate
+      ->middlewareFor('store', 'can:update-operational-record')
+      and update Store*Request authorize() to: return Gate::allows('update-operational-record');
+
+    Option B (allow staff create): keep but add comment in routes/web.php and make authorize() explicit:
+      // Staff may create but not edit - intentional for workflow
+
+  Verify:
+    As staff POST /admin/inventory -> 403 if Option A, 201 if Option B
+    php artisan route:list | grep inventory -> check middleware columns
+
+  RAT Why Missed: RAT flagged mass-assignment on same controllers but did not check middlewareFor coverage gap for store vs update.
+
+
+--------------------------------------------------------------------------------
+[LOW] AF-07 - Weak UpdateTaskRequest Validation
+--------------------------------------------------------------------------------
+Severity:    LOW | Confidence: HIGH | OWASP: A03
+Locations:
+  app/Http/Requests/Api/StoreTaskRequest.php:30  'status' => ['required', Rule::enum(TaskStatus::class)]
+  app/Http/Requests/Api/UpdateTaskRequest.php:25 'status' => 'sometimes|required' (missing enum)
+  app/Models/Task.php:13  fillable status
+  app/Repositories/BaseRepository.php:34  update()
+
+Description:
+  Store validates status against enum TaskStatus::class (e.g., pending, in_progress, completed)
+  Update only checks sometimes|required, allows ANY string like "hacked" or "'; DROP TABLE".
+
+  BaseRepository.php:34 $model->update($attributes) writes arbitrary value to tasks.status column.
+  DB column likely varchar with default TaskStatus::default(), but now corrupted.
+
+  Impact: Business logic corruption, UI breaks expecting enum, potential sort/filter bypass via QueryBuilder allowedFilters status.
+
+  Fix P2:
+    // app/Http/Requests/Api/UpdateTaskRequest.php:25
+    use App\Enums\TaskStatus; use Illuminate\Validation\Rule;
+    'status' => ['sometimes','required', Rule::enum(TaskStatus::class)],
+
+  Verify:
+    PUT /api/v1/tasks/1 with {status: "invalid"} -> 422 not 200
+
+  RAT Why Missed: RAT hidden_behavior flagged file but not validation diff; its sink detector does not compare Store vs Update rules.
+
+
+--------------------------------------------------------------------------------
+[LOW] AF-08 - Inventory Stock Adjustment Race & Negative-Cap
+--------------------------------------------------------------------------------
+Severity:    LOW | Confidence: MEDIUM | OWASP: A06
+Locations:
+  app/Repositories/Inventory/InventoryItemRepository.php:120-125  adjustCurrentStock()
+  app/Repositories/Pos/PosOrderRepository.php:33  sellableProductsForCheckout() uses lockForUpdate
+  app/Services/Pos/PosOrderService.php:95  adjustCurrentStock($product, -quantity) inside transaction
+
+Description:
+  adjustCurrentStock():
+    public function adjustCurrentStock(InventoryItem $item, float $delta): void {
+        $item->current_stock = max(0, (float)$item->current_stock + $delta);
+        $item->save(); // NOT locked
+    }
+
+  POS checkout PosOrderService.php:56 DB::transaction with sellableProductsForCheckout() that DOES use lockForUpdate for reads, but adjustCurrentStock itself later does separate SELECT + UPDATE without FOR UPDATE. Concurrent voids + checkouts can race:
+
+  T1: read stock 10 -> T2: read stock 10 -> T1: write 9 (10-1) -> T2: write 9 (10-1) => lost update, should be 8
+
+  max(0, ...) prevents negative but hides oversell; two concurrent orders both see 1 left, both succeed writing 0, but should have failed second.
+
+  Impact: Oversell, inventory drift.
+
+  Fix P2:
+    // app/Repositories/Inventory/InventoryItemRepository.php
+    public function adjustCurrentStock(InventoryItem $item, float $delta): void {
+        DB::transaction(function() use ($item, $delta) {
+            $fresh = InventoryItem::where('id', $item->id)->lockForUpdate()->firstOrFail();
+            $fresh->current_stock = max(0, (float)$fresh->current_stock + $delta);
+            $fresh->save();
+        });
+    }
+    // Or use atomic: InventoryItem::where('id',$item->id)->update(['current_stock'=>DB::raw('GREATEST(0, current_stock + '.$delta.')')]);
+
+  Verify:
+    Run concurrent php artisan tinker jobs adjusting same item, check final stock equals sum deltas.
+
+  RAT Why Missed: RAT hidden_behavior saw job but not DB race; no concurrency analysis.
+
+
+--------------------------------------------------------------------------------
+[INFO] AF-09 - ProcessTaskActivity Job Self-Recursion
+--------------------------------------------------------------------------------
+Severity:    INFO | Confidence: HIGH
+Locations:
+  app/Jobs/ProcessTaskActivity.php:24-30
+  app/Jobs/ProcessTaskActivity.php:29  self::dispatch($task,$action)
+  app/Repositories/TaskRepository.php:48  ProcessTaskActivity::dispatch($task,'created')
+
+Description:
+  Job definition:
+    class ProcessTaskActivity implements ShouldQueue {
+        public function __construct() { } // no args
+        public function handle(TaskActivityLogged $event) {
+            // ...
+            self::dispatch($task, $action); // 2 args but ctor 0 args!
+        }
+    }
+
+  TaskRepository dispatches with 2 args, but if queue worker runs handle(TaskActivityLogged) it will dispatch again with wrong arity -> ArgumentCountError.
+
+  Currently likely not queued (CACHE_DRIVER=redis but queue not observed failing), dead code.
+
+  Impact: Not security, but indicates untested hidden behavior RAT flagged as "hidden side effect" RAT-013.
+
+  Fix P2:
+    Remove self::dispatch line or fix ctor: public function __construct(public Task $task, public string $action) {}
+
+  Verify:
+    php artisan queue:work --once -> check logs no ArgumentCountError
+    php artisan rat:why TaskRepository -> should not show recursion
+
+  RAT Why Missed: RAT flagged as hidden side effect correctly but severity MEDIUM overblown and did not detect ctor mismatch.
+
+
+================================================================================
+PRIORITIZED FIX ORDER
+================================================================================
+P0 (24h - block release):
+  1. AF-01 routes/api/v1.php move apiResource inside auth:sanctum + fix authorize + findOrFail
+  2. AF-02 routes/web.php:49 void gate + replace PIN with current_password + revert purchase order
+
+P1 (This sprint):
+  3. AF-03 routes/web.php:57 receipt can: + throttle
+  4. AF-04 User.php:19 fillable
+  5. AF-05 HandleAppearance.php whitelist
+  6. AF-06 routes/web.php store gate decision
+
+P2 (Hardening):
+  7. AF-07 UpdateTaskRequest enum
+  8. AF-08 lockForUpdate
+  9. AF-09 fix job ctor
+
+================================================================================
+VERIFICATION CHECKLIST
+================================================================================
+[ ] php artisan route:list | grep -E "tasks|receipt|void" -> tasks shows auth:sanctum, receipt shows can: , void shows can:
+[ ] curl -H "Accept: application/json" http://localhost:8000/api/v1/tasks -> 401
+[ ] curl with token GET /api/v1/tasks -> 200 with paginated tasks
+[ ] Staff POST /api/v1/tasks without token -> 401 not 500
+[ ] Staff PATCH /admin/pos/orders/1/void without admin PIN -> 422/403, with valid admin password -> 200 and stock restored + purchase order voided
+[ ] Staff GET /admin/purchase-orders/1/receipt -> 403 if not admin, 200 if admin
+[ ] grep fillable app/Models/User.php -> no role
+[ ] curl -H "Cookie: appearance=<script>" /admin/dashboard -> HTML contains system not script
+[ ] PUT /api/v1/tasks/1 {status: "invalid"} -> 422
+[ ] Concurrent stock adjust test -> no lost update
+[ ] php artisan rat --deep --no-image -> verify AF-01..AF-03 no longer flagged as new HIGH after baseline update: php artisan rat:baseline --update
+
+================================================================================
+END
+================================================================================
