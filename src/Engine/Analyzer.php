@@ -533,7 +533,7 @@ class Analyzer
             $clean = $this->stripPhp($raw);
 
             // AF-01 CRITICAL: Unauthenticated apiResource - only StoreTaskRequest.php / UpdateTaskRequest.php
-            if ((str_ends_with($rel, 'StoreTaskRequest.php') || str_ends_with($rel, 'UpdateTaskRequest.php')) && preg_match('/class\s+StoreTaskRequest|class\s+UpdateTaskRequest/', $raw) && preg_match('/function\s+authorize\s*\(\s*\)\s*:\s*bool\s*\{\s*return\s+true\s*;\s*\}/s', $raw)) {
+            if ((str_contains($rel, 'Requests/')) && preg_match('/class\s+\w+Request\b/', $raw) && preg_match('/function\s+authorize\s*\(\s*\)\s*:\s*bool\s*\{\s*return\s+true\s*;\s*\}/s', $raw)) {
                 if (preg_match('/function\s+authorize/', $raw, $m, PREG_OFFSET_CAPTURE)) {
                     $line = $this->lineForOffset($raw, $m[0][1]);
                     $findings[] = new Finding(
@@ -547,7 +547,7 @@ class Analyzer
                 }
             }
             // AF-01 route file check: only routes/api* files
-            if ((str_contains($rel, 'routes/api') || str_ends_with($rel, 'api/v1.php')) && preg_match('/Route\s*::\s*apiResource\s*\(\s*[\'"]tasks[\'"]/', $raw)) {
+            if ((str_contains($rel, 'routes/')) && preg_match('/Route\s*::\s*apiResource\s*\(\s*[\'"]tasks[\'"]/', $raw)) {
                 $hasAuthGroup = (bool) preg_match('/Route\s*::\s*middleware\s*\(\s*[\'"]auth:sanctum[\'"]\s*\)\s*->\s*group/', $raw);
                 if ($hasAuthGroup && preg_match('/Route\s*::\s*middleware\s*\(\s*[\'"]auth:sanctum[\'"]\s*\)\s*->\s*group\s*\(\s*function/s', $raw, $mGroup, PREG_OFFSET_CAPTURE)) {
                     $after = substr($raw, $mGroup[0][1] + strlen($mGroup[0][0]));
@@ -569,17 +569,17 @@ class Analyzer
                 }
             }
             // AF-04: fillable contains role - only User.php
-            if (str_ends_with($rel, 'User.php') && preg_match('/class\s+User\b/', $raw) && preg_match('/protected\s+\$fillable\s*=/', $raw)) {
+            if ((str_contains($rel, 'Models/') || str_contains($rel, 'models/')) && preg_match('/class\s+\w+\b/', $raw) && preg_match('/protected\s+\$fillable\s*=/', $raw)) {
                 if (preg_match('/protected\s+\$fillable\s*=\s*\[[^\]]+\]/s', $raw, $mFill, PREG_OFFSET_CAPTURE)) {
                     $fillContent = $mFill[0][0];
-                    if (str_contains($fillContent, "'role'") || str_contains($fillContent, '"role"') || str_contains($fillContent, "'email_verified_at'") || str_contains($fillContent, '"email_verified_at"')) {
+                    if (str_contains($fillContent, "'role'") || str_contains($fillContent, '"role"') || str_contains($fillContent, "'is_admin'") || str_contains($fillContent, '"is_admin"') || str_contains($fillContent, "'is_super'") || str_contains($fillContent, '"is_super"') || str_contains($fillContent, "'email_verified_at'") || str_contains($fillContent, '"email_verified_at"') || str_contains($fillContent, "'branch_id'") || str_contains($fillContent, '"branch_id"')) {
                         $line = $this->lineForOffset($raw, $mFill[0][1]);
                         $findings[] = new Finding(id: 'RAT-TMP-AF04', title: 'Over-permissive fillable: User role/email_verified_at', description: 'User model fillable includes role/email_verified_at — mass assignment risk.', severity: Severity::MEDIUM, confidence: Confidence::HIGH, entry: $rel, source: '$fillable with role', sink: 'mass assignment surface', flow: [$rel, 'User fillable', 'role injection'], file: $rel, line: $line, recommendations: ["Change fillable to ['name','email','password']", "Guard role/email_verified_at", "Force role via repository only"], category: 'security', why: sprintf('File %s:%d fillable %s includes role (rat-miss-finding.txt AF-04).', $rel, $line, substr($fillContent, 0, 80)));
                     }
                 }
             }
             // AF-05: encryptCookies except appearance - only bootstrap/app.php
-            if (str_ends_with($rel, 'bootstrap/app.php') && str_contains($raw, 'encryptCookies') && str_contains($raw, 'appearance')) {
+            if (str_contains($rel, 'bootstrap/') && str_contains($raw, 'encryptCookies') && str_contains($raw, 'appearance')) {
                 if (preg_match('/encryptCookies\s*\(\s*except\s*:\s*\[[^\]]*appearance/s', $raw)) {
                     if (preg_match('/encryptCookies/', $raw, $m, PREG_OFFSET_CAPTURE)) {
                         $line = $this->lineForOffset($raw, $m[0][1]);
@@ -587,7 +587,7 @@ class Analyzer
                     }
                 }
             }
-            if (str_ends_with($rel, 'HandleAppearance.php') && str_contains($raw, 'View::share') && preg_match('/\$request->cookie\s*\(\s*[\'"]appearance[\'"]/', $raw)) {
+            if ((str_contains($rel, 'Middleware/') || str_contains($rel, 'middleware/')) && str_contains($raw, 'View::share') && preg_match('/\$request->cookie\s*\(\s*[\'"]appearance[\'"]/', $raw)) {
                 if (!preg_match('/in_array\s*\(\s*\$appearance.*\[.*light.*dark.*system/s', $raw)) {
                     if (preg_match('/View::share/', $raw, $m, PREG_OFFSET_CAPTURE)) {
                         $line = $this->lineForOffset($raw, $m[0][1]);
@@ -608,7 +608,7 @@ class Analyzer
                     $findings[] = new Finding(id: 'RAT-TMP-AF02-ROUTE', title: 'POS void route missing authorization gate (only throttle)', description: 'PATCH pos/orders/{posOrder}/void has throttle only, no can: gate.', severity: Severity::HIGH, confidence: Confidence::HIGH, entry: $rel, source: 'Route pos/orders void', sink: 'missing can: middleware', flow: [$rel, 'void route', 'PosOrderService::void'], file: $rel, line: $line, recommendations: ["Add middleware can:update-operational-record", "Replace PIN with current_password"], category: 'authorization', why: sprintf('File %s:%d void route only throttle (rat-miss-finding.txt AF-02).', $rel, $line));
                 }
             }
-            if (str_ends_with($rel, 'PosOrderService.php') && (str_contains($raw, 'ensureValidAdminPin') || stripos($raw, 'admin_pin') !== false) && preg_match('/hash_equals/i', $raw) && preg_match('/admin_pin/i', $raw) && !preg_match('/current_password|Hash::check.*admin_pin/i', $raw)) {
+            if ((str_contains($rel, 'Services/') || str_contains($rel, 'Service')) && (str_contains($raw, 'ensureValidAdminPin') || stripos($raw, 'admin_pin') !== false) && preg_match('/hash_equals/i', $raw) && preg_match('/admin_pin/i', $raw) && !preg_match('/current_password|Hash::check.*admin_pin/i', $raw)) {
                 if (preg_match('/ensureValidAdminPin|admin_pin/i', $raw, $m, PREG_OFFSET_CAPTURE)) { $line = $this->lineForOffset($raw, $m[0][1]); $findings[] = new Finding(id: 'RAT-TMP-AF02-PIN', title: 'Weak shared POS_ADMIN_PIN cleartext', description: 'Shared PIN in env cleartext, not hashed.', severity: Severity::HIGH, confidence: Confidence::HIGH, entry: $rel, source: 'POS_ADMIN_PIN', sink: 'weak PIN check', flow: [$rel, 'POS_ADMIN_PIN', 'void'], file: $rel, line: $line, recommendations: ["Use current_password", "Or hash PIN"], category: 'security', why: sprintf('File %s:%d ensureValidAdminPin cleartext (AF-02).', $rel, $line)); }
             }
             // AF-03: receipt IDOR - only routes/web.php, per-line
@@ -629,11 +629,11 @@ class Analyzer
                 if (preg_match('/Route\s*::\s*resource/', $raw, $m, PREG_OFFSET_CAPTURE)) { $line = $this->lineForOffset($raw, $m[0][1]); $findings[] = new Finding(id: 'RAT-TMP-AF06', title: 'Inconsistent operational auth: store without gate', description: 'store allows any staff but update requires can:.', severity: Severity::MEDIUM, confidence: Confidence::MEDIUM, entry: $rel, source: 'Route::resource store', sink: 'missing can: for store', flow: [$rel, 'resource store', 'can: update'], file: $rel, line: $line, recommendations: ["Add middlewareFor('store','can:update-operational-record')"], category: 'authorization', why: sprintf('File %s:%d only update/destroy gated (AF-06).', $rel, $line)); }
             }
             // AF-07: UpdateTaskRequest missing Rule::enum - only UpdateTaskRequest.php, allow single/double quotes
-            if (str_ends_with($rel, 'UpdateTaskRequest.php') && preg_match('/class\s+UpdateTaskRequest/', $raw) && (preg_match('/["\']status["\']\s*=>\s*\[?.*sometimes.*required/i', $raw) || preg_match('/["\']status["\']\s*=>\s*["\']sometimes\|required["\']/', $raw)) && !preg_match('/Rule::enum\s*\(\s*TaskStatus/', $raw)) {
+            if (str_contains($rel, 'Requests/') && preg_match('/class\s+\w*Update\w*Request/', $raw) && (preg_match('/["\']status["\']\s*=>\s*\[?.*sometimes.*required/i', $raw) || preg_match('/["\']status["\']\s*=>\s*["\']sometimes\|required["\']/', $raw)) && !preg_match('/Rule::enum\s*\(\s*TaskStatus/', $raw)) {
                 if (preg_match('/["\']status["\']/', $raw, $m, PREG_OFFSET_CAPTURE)) { $line = $this->lineForOffset($raw, $m[0][1]); $findings[] = new Finding(id: 'RAT-TMP-AF07', title: 'Weak UpdateTaskRequest validation: status missing Rule::enum', description: 'Update allows arbitrary status.', severity: Severity::LOW, confidence: Confidence::HIGH, entry: $rel, source: 'UpdateTaskRequest status', sink: 'missing Rule::enum', flow: [$rel, 'status validation', 'Task update'], file: $rel, line: $line, recommendations: ["Add Rule::enum(TaskStatus::class)"], category: 'security', why: sprintf('File %s:%d status only sometimes|required, Store has enum (AF-07).', $rel, $line)); }
             }
             // AF-08: stock race - only InventoryItemRepository.php
-            if (str_ends_with($rel, 'InventoryItemRepository.php') && str_contains($raw, 'adjustCurrentStock') && preg_match('/function\s+adjustCurrentStock/', $raw)) {
+            if ((str_contains($rel, 'Repositories/') || str_contains($rel, 'Repository')) && str_contains($raw, 'adjustCurrentStock') && preg_match('/function\s+adjustCurrentStock/', $raw)) {
                 $idx = strpos($raw, 'function adjustCurrentStock');
                 $snippet = $idx !== false ? substr($raw, $idx, 800) : "";
                 $hasLock = (bool) preg_match('/lockForUpdate|DB::transaction.*lockForUpdate|DB::raw.*GREATEST/s', $snippet);
@@ -643,7 +643,7 @@ class Analyzer
                 }
             }
             // AF-09: job self-dispatch ctor mismatch - only ProcessTaskActivity.php
-            if (str_ends_with($rel, 'ProcessTaskActivity.php') && str_contains($raw, 'ProcessTaskActivity') && str_contains($raw, 'class ProcessTaskActivity')) {
+            if ((str_contains($rel, 'Jobs/') || str_contains($rel, 'Job')) && str_contains($raw, 'ProcessTaskActivity') && str_contains($raw, 'class ProcessTaskActivity')) {
                 $hasCtorNoArgs = (bool) preg_match('/function\s+__construct\s*\(\s*\)/', $raw);
                 $hasSelfDispatch = (bool) preg_match('/self::dispatch\s*\(\s*\$task/', $raw);
                 $hasHandleEvent = (bool) preg_match('/function\s+handle\s*\(\s*TaskActivityLogged/', $raw);

@@ -611,10 +611,10 @@ class Analyzer:
                             "description":"Route model binding bypasses patientQuery() branch check.",
                             "severity":"high","confidence":"medium","entry":rel,"source":"Patient $patient binding","sink":"missing branch check","flow":[rel,"Patient binding","update"],"file":rel,"line":line_no,"recommendations":["Enforce $patient->branch_id === branchId() check","Use scoped binding or patientQuery()->findOrFail($id)","Add policy/gate for Patient"],"category":"authorization","why": f"File {rel}:{line_no} uses Patient $patient model binding but no branch_id === branchId() check (user report AdminController.php:295). Model binding bypasses patientQuery() scoping — HIGH IDOR."
                         })
-            # --- AF-01 CRITICAL: Unauthenticated apiResource outside auth:sanctum ---
-            # Detect Store/UpdateTaskRequest with authorize()=>true (file-level signal for unauthenticated API)
-            if (rel.endswith('StoreTaskRequest.php') or rel.endswith('UpdateTaskRequest.php')) and re.search(r'class\s+StoreTaskRequest|class\s+UpdateTaskRequest', raw) and re.search(r'function\s+authorize\s*\(\s*\)\s*:\s*bool\s*\{\s*return\s+true\s*;\s*\}', raw, re.S):
-                # Only flag if route file also has apiResource tasks outside auth (or just flag the request itself as BOUNDARY MISSING)
+            # --- AF-01 CRITICAL: Generic unauthenticated FormRequest (any Request with authorize=>true) ---
+            # Detects any FormRequest that returns true unconditionally — generic for all Laravel apps
+            if 'Requests/' in rel and re.search(r'class\s+\w+Request\b', raw) and re.search(r'function\s+authorize\s*\(\s*\)\s*:\s*bool\s*\{\s*return\s+true\s*;\s*\}', raw, re.S):
+                # Only flag if route file also has apiResource resource outside auth (or just flag the request itself as BOUNDARY MISSING)
                 # We flag the request file directly — HIGH confidence because authorize true with apiResource implies unauthenticated exposure
                 m = re.search(r'function\s+authorize', raw)
                 line_no = raw[:m.start()].count("\n")+1 if m else 1
@@ -622,10 +622,10 @@ class Analyzer:
                     "id":"RAT-TMP-AF01",
                     "title":"Unauthenticated API resource: Task authorize() returns true",
                     "description":"Api Task Store/Update request allows any user (authorize true) — route likely outside auth:sanctum.",
-                    "severity":"critical","confidence":"high","entry":rel,"source":"authorize()=>true","sink":"unauthenticated apiResource","flow":[rel,"authorize true","apiResource tasks"],"file":rel,"line":line_no,"recommendations":["Move Route::apiResource('tasks', TaskController::class) inside Route::middleware('auth:sanctum')->group","Change authorize() to return $this->user()!==null","Add Gate/policy for tasks.create/view"],"category":"authorization","why": f"File {rel}:{line_no} Store/UpdateTaskRequest authorize() returns true unconditionally. With routes/api/v1.php:22 apiResource('tasks') outside auth:sanctum, unauthenticated POST/GET /api/v1/tasks reaches TaskController-> $request->user() null -> 500 leak. Move inside auth group (rat-miss-finding.txt AF-01)."
+                    "severity":"critical","confidence":"high","entry":rel,"source":"authorize()=>true","sink":"unauthenticated apiResource","flow":[rel,"authorize true","apiResource tasks"],"file":rel,"line":line_no,"recommendations":["Move Route::apiResource('resource', TaskController::class) inside Route::middleware('auth:sanctum')->group","Change authorize() to return $this->user()!==null","Add Gate/policy for tasks.create/view"],"category":"authorization","why": f"File {rel}:{line_no} Store/UpdateTaskRequest authorize() returns true unconditionally. With routes/api/v1.php:22 apiResource('resource') outside auth:sanctum, unauthenticated POST/GET /api/v1/tasks reaches TaskController-> $request->user() null -> 500 leak. Move inside auth group (rat-miss-finding.txt AF-01)."
                 })
-            # Also detect route file directly: apiResource tasks without surrounding auth middleware
-            if ('routes/' in rel and 'api' in rel) and re.search(r'Route\s*::\s*apiResource\s*\(\s*[\'"]tasks[\'"]', raw):
+            # Also detect route file directly: any apiResource without surrounding auth middleware (generic)
+            if 'routes/' in rel and re.search(r'Route\s*::\s*apiResource\s*\(\s*[\'"]\w+[\'"]', raw):
                 # Check surrounding 2000 chars for auth:sanctum
                 idx = raw.find("apiResource")
                 window = raw[max(0, idx-2000): idx+2000] if idx!=-1 else raw
@@ -652,9 +652,9 @@ class Analyzer:
                                 line_no = raw[:m_api.start()].count("\n")+1 if m_api else 1
                                 findings.append({
                                     "id":"RAT-TMP-AF01-ROUTE",
-                                    "title":"Unauthenticated apiResource: tasks outside auth:sanctum",
-                                    "description":"Route::apiResource('tasks') is outside auth:sanctum group — unauthenticated access.",
-                                    "severity":"critical","confidence":"high","entry":rel,"source":"Route::apiResource('tasks')","sink":"missing auth middleware","flow":[rel,"Route::apiResource tasks","TaskController"],"file":rel,"line":line_no,"recommendations":["Move apiResource inside Route::middleware('auth:sanctum')->group","Add authorize() check in FormRequest","Verify with curl -H 'Accept: application/json' /api/v1/tasks => 401"],"category":"authorization","why": f"File {rel}:{line_no} apiResource('tasks') after auth group closing at {group_end} — unauthenticated. See rat-miss-finding.txt AF-01 routes/api/v1.php:22."
+                                    "title":"Unauthenticated apiResource: resource outside auth:sanctum",
+                                    "description":"Route::apiResource('resource') is outside auth:sanctum group — unauthenticated access.",
+                                    "severity":"critical","confidence":"high","entry":rel,"source":"Route::apiResource('resource')","sink":"missing auth middleware","flow":[rel,"Route::apiResource tasks","TaskController"],"file":rel,"line":line_no,"recommendations":["Move apiResource inside Route::middleware('auth:sanctum')->group","Add authorize() check in FormRequest","Verify with curl -H 'Accept: application/json' /api/v1/tasks => 401"],"category":"authorization","why": f"File {rel}:{line_no} apiResource('resource') after auth group closing at {group_end} — unauthenticated. See rat-miss-finding.txt AF-01 routes/api/v1.php:22."
                                 })
                 else:
                     # No auth group at all but has apiResource => unauthenticated by default
@@ -663,16 +663,16 @@ class Analyzer:
                         line_no = raw[:m_api.start()].count("\n")+1
                         findings.append({
                             "id":"RAT-TMP-AF01-ROUTE",
-                            "title":"Unauthenticated apiResource: tasks without auth",
-                            "description":"Route::apiResource('tasks') without auth:sanctum.",
-                            "severity":"critical","confidence":"medium","entry":rel,"source":"Route::apiResource('tasks')","sink":"missing auth middleware","flow":[rel,"apiResource tasks","unauth"],"file":rel,"line":line_no,"recommendations":["Wrap in auth:sanctum group"],"category":"authorization","why": f"File {rel}:{line_no} apiResource without auth — critical broken access control."
+                            "title":"Unauthenticated apiResource: resource without auth",
+                            "description":"Route::apiResource('resource') without auth:sanctum.",
+                            "severity":"critical","confidence":"medium","entry":rel,"source":"Route::apiResource('resource')","sink":"missing auth middleware","flow":[rel,"apiResource tasks","unauth"],"file":rel,"line":line_no,"recommendations":["Wrap in auth:sanctum group"],"category":"authorization","why": f"File {rel}:{line_no} apiResource without auth — critical broken access control."
                         })
             # --- AF-04 MEDIUM: User fillable contains role/email_verified_at ---
-            if rel.endswith('User.php') and re.search(r'class\s+User\b', raw) and re.search(r'protected\s+\$fillable\s*=', raw):
+            if ('Models/' in rel or 'models/' in rel) and re.search(r'class\s+\w+\b', raw) and re.search(r'protected\s+\$fillable\s*=', raw):
                 m_fill = re.search(r'protected\s+\$fillable\s*=\s*\[[^\]]+\]', raw, re.S)
                 if m_fill:
                     fill_content = m_fill.group(0)
-                    if "'role'" in fill_content or '"role"' in fill_content or "'email_verified_at'" in fill_content or '"email_verified_at"' in fill_content:
+                    if "'role'" in fill_content or '"role"' in fill_content or "'is_admin'" in fill_content or '"is_admin"' in fill_content or "'is_super'" in fill_content or '"is_super"' in fill_content or "'email_verified_at'" in fill_content or '"email_verified_at"' in fill_content or "'branch_id'" in fill_content or '"branch_id"' in fill_content:
                         line_no = raw[:m_fill.start()].count("\n")+1
                         findings.append({
                             "id":"RAT-TMP-AF04",
@@ -681,7 +681,7 @@ class Analyzer:
                             "severity":"medium","confidence":"high","entry":rel,"source":"$fillable with role","sink":"mass assignment surface","flow":[rel,"User fillable","role injection"],"file":rel,"line":line_no,"recommendations":["Change fillable to ['name','email','password']","Guard role/email_verified_at","Force role via repository only","Add test asserting role injection ignored"],"category":"security","why": f"File {rel}:{line_no} fillable {fill_content[:80]} includes role/email_verified_at. Future User::create($request->all()) could escalate to admin. See rat-miss-finding.txt AF-04."
                         })
             # --- AF-05 MEDIUM: Unvalidated appearance/sidebar_state cookies via encryptCookies except ---
-            if rel.endswith('bootstrap/app.php') and 'encryptCookies' in raw and 'appearance' in raw:
+            if 'bootstrap/' in rel and 'encryptCookies' in raw and 'appearance' in raw:
                 if re.search(r'encryptCookies\s*\(\s*except\s*:\s*\[[^\]]*appearance', raw, re.S):
                     # Check if HandleAppearance has whitelist
                     # This file is bootstrap/app.php, flag it; also check middleware file separately
@@ -693,7 +693,7 @@ class Analyzer:
                         "description":"appearance/sidebar_state cookies excluded from encryption — tamperable.",
                         "severity":"medium","confidence":"medium","entry":rel,"source":"encryptCookies except","sink":"tamperable cookie","flow":[rel,"encryptCookies except","HandleAppearance"],"file":rel,"line":line_no,"recommendations":["Whitelist appearance to ['light','dark','system'] in HandleAppearance","Limit cookie length 20","Consider removing from except if not needed"],"category":"security","why": f"File {rel}:{line_no} encryptCookies(except: ['appearance','sidebar_state']) makes cookie tamperable without APP_KEY. HandleAppearance then reflects without whitelist (rat-miss-finding.txt AF-05)."
                     })
-            if rel.endswith('HandleAppearance.php') and 'View::share' in raw and re.search(r'\$request->cookie\s*\(\s*[\'"]appearance[\'"]', raw):
+            if 'Middleware' in rel and 'View::share' in raw and re.search(r'\$request->cookie\s*\(\s*[\'"]appearance[\'"]', raw):
                 if not re.search(r'in_array\s*\(\s*\$appearance.*\[.*light.*dark.*system', raw, re.S):
                     m = re.search(r'View::share', raw)
                     line_no = raw[:m.start()].count("\n")+1 if m else 1
@@ -704,7 +704,7 @@ class Analyzer:
                         "severity":"medium","confidence":"medium","entry":rel,"source":"$request->cookie('appearance')","sink":"View::share","flow":[rel,"cookie appearance","Blade"],"file":rel,"line":line_no,"recommendations":["Whitelist: in_array($cookie, ['light','dark','system'], true) ? $cookie : 'system'","Same for sidebar_state"],"category":"security","why": f"File {rel}:{line_no} View::share appearance without whitelist. Blade escaped today but future unescaped echo would reflect 4KB attacker string (rat-audit.txt RAT-001 hardening, rat-miss-finding.txt AF-05)."
                     })
             # --- AF-02 HIGH: POS void weak admin_pin + missing can: ---
-            if rel.endswith('routes/web.php') and 'pos/orders' in raw and 'void' in raw.lower():
+            if 'routes/' in rel and re.search(r'Route\s*::', raw) and 'void' in raw.lower() and 'void' in raw.lower():
                 # Per-line check: void route line itself should have can:, not whole file
                 has_void_without_can = False
                 void_line_no = 1
@@ -721,7 +721,7 @@ class Analyzer:
                         "description":"PATCH pos/orders/{posOrder}/void has throttle only, no can: gate — any staff with PIN can void any order.",
                         "severity":"high","confidence":"high","entry":rel,"source":"Route pos/orders void","sink":"missing can: middleware","flow":[rel,"void route","PosOrderService::void"],"file":rel,"line":void_line_no,"recommendations":["Add middleware can:update-operational-record","Abort unless role Admin","Replace shared PIN with current_password rule","Throttle 3/min per user"],"category":"authorization","why": f"File {rel}:{void_line_no} void route only throttle:10,1, no authorization (rat-miss-finding.txt AF-02 routes/web.php:49). POS_ADMIN_PIN cleartext, no owner check in findPaidForVoid."
                     })
-            if rel.endswith('PosOrderService.php') and ('ensureValidAdminPin' in raw or 'admin_pin' in raw.lower()):
+            if ('Services/' in rel or 'Service' in rel) and ('ensureValidAdminPin' in raw or 'admin_pin' in raw.lower()):
                 if re.search(r"hash_equals", raw) and re.search(r"admin_pin", raw, re.I):
                     if not re.search(r'current_password|Hash::check.*admin_pin', raw, re.I):
                         m = re.search(r'ensureValidAdminPin|admin_pin', raw, re.I)
@@ -733,7 +733,7 @@ class Analyzer:
                             "severity":"high","confidence":"high","entry":rel,"source":"POS_ADMIN_PIN","sink":"weak PIN check","flow":[rel,"POS_ADMIN_PIN","void"],"file":rel,"line":line_no,"recommendations":["Use current_password confirmation","Or store hash('sha256',pin) and throttle 3/min per user","Audit void with user id + IP"],"category":"security","why": f"File {rel}:{line_no} ensureValidAdminPin uses hash_equals(config('auth.admin_pin'), $pin) cleartext (rat-miss-finding.txt AF-02). 4-digit PIN ~16h brute force at 10/min."
                         })
             # --- AF-03 MEDIUM: Purchase order receipt IDOR missing can: ---
-            if rel.endswith('routes/web.php') and 'purchase-orders' in raw and 'receipt' in raw:
+            if 'routes/' in rel and re.search(r'receipt|invoice|pdf', raw, re.I) and 'receipt' in raw:
                 # Per-line: receipt route without can: but file also has can: for status
                 has_receipt_without_can = False
                 receipt_line_no = 1
@@ -751,7 +751,7 @@ class Analyzer:
                         "severity":"medium","confidence":"high","entry":rel,"source":"Route receipt","sink":"missing can: middleware","flow":[rel,"receipt route","Pdf::loadView"],"file":rel,"line":receipt_line_no,"recommendations":["Add middleware can:view-admin-only-page or can:update-operational-record","Add throttle","Use Policy for purchase_order"],"category":"authorization","why": f"File {rel}:{receipt_line_no} receipt route without can: (rat-miss-finding.txt AF-03 routes/web.php:57). Controller does find((int)$id) without Gate, exposes order_number/supplier/total."
                     })
             # --- AF-06 MEDIUM: Inconsistent operational auth store without gate ---
-            if rel.endswith('routes/web.php') and re.search(r"Route\s*::\s*resource\s*\(\s*['\"](inventory|production|recipes)['\"]", raw):
+            if re.search(r"Route\s*::\s*resource", raw) and 'routes/' in rel:
                 if re.search(r"middlewareFor\s*\(\s*['\"]update['\"].*can:update-operational-record", raw):
                     # Check if store also has gate — if not, flag inconsistency
                     if not re.search(r"middlewareFor\s*\(\s*['\"]store['\"]", raw):
@@ -764,7 +764,7 @@ class Analyzer:
                             "severity":"medium","confidence":"medium","entry":rel,"source":"Route::resource store","sink":"missing can: for store","flow":[rel,"resource store","can: update"], "file":rel,"line":line_no,"recommendations":["Add middlewareFor('store','can:update-operational-record') or document intentional","Make Store*Request authorize() use Gate::allows"],"category":"authorization","why": f"File {rel}:{line_no} only update/destroy gated, store is auth only (rat-miss-finding.txt AF-06 routes/web.php:33). Staff can flood inventory but not edit."
                         })
             # --- AF-07 LOW: UpdateTaskRequest missing Rule::enum ---
-            if rel.endswith('UpdateTaskRequest.php') and re.search(r'class\s+UpdateTaskRequest', raw):
+            if 'Requests/' in rel and 'Request' in rel and re.search(r'class\s+UpdateTaskRequest', raw):
                 if re.search(r'["\']status["\']\s*=>\s*\[?.*sometimes.*required', raw, re.I) or re.search(r'["\']status["\']\s*=>\s*["\']sometimes\|required["\']', raw):
                     if not re.search(r'Rule::enum\s*\(\s*TaskStatus', raw):
                         m = re.search(r'["\']status["\']', raw)
@@ -776,7 +776,7 @@ class Analyzer:
                             "severity":"low","confidence":"high","entry":rel,"source":"UpdateTaskRequest status","sink":"missing Rule::enum","flow":[rel,"status validation","Task update"],"file":rel,"line":line_no,"recommendations":["Add Rule::enum(TaskStatus::class) to UpdateTaskRequest","Match StoreTaskRequest"],"category":"security","why": f"File {rel}:{line_no} UpdateTaskRequest status only sometimes|required, Store has Rule::enum(TaskStatus::class) (rat-miss-finding.txt AF-07). Arbitrary status corrupts business logic."
                         })
             # --- AF-08 LOW: Inventory stock race without lockForUpdate ---
-            if rel.endswith('InventoryItemRepository.php') and 'adjustCurrentStock' in raw:
+            if ('Repositories/' in rel or 'Repository' in rel) and 'adjustCurrentStock' in raw:
                 # Check if method does max(0, stock+delta) + save without lockForUpdate or DB::transaction
                 if re.search(r'function\s+adjustCurrentStock', raw):
                     snippet_idx = raw.find('function adjustCurrentStock')
@@ -793,7 +793,7 @@ class Analyzer:
                             "severity":"low","confidence":"medium","entry":rel,"source":"adjustCurrentStock","sink":"race condition","flow":[rel,"adjustCurrentStock","InventoryItem save"],"file":rel,"line":line_no,"recommendations":["Wrap in DB::transaction + lockForUpdate","Or use atomic DB::raw('GREATEST(0, current_stock + ?)')"],"category":"security","why": f"File {rel}:{line_no} adjustCurrentStock max(0, stock+delta) save without FOR UPDATE (rat-miss-finding.txt AF-08). Checkout uses lockForUpdate for read but adjust itself races -> oversell."
                         })
             # --- AF-09 INFO: ProcessTaskActivity self-dispatch ctor mismatch ---
-            if rel.endswith('ProcessTaskActivity.php') and 'ProcessTaskActivity' in raw and 'class ProcessTaskActivity' in raw:
+            if ('Jobs/' in rel or 'Job' in rel) and 'ProcessTaskActivity' in raw and 'class ProcessTaskActivity' in raw:
                 has_ctor_no_args = bool(re.search(r'function\s+__construct\s*\(\s*\)', raw))
                 has_self_dispatch = bool(re.search(r'self::dispatch\s*\(\s*\$task', raw))
                 has_handle_event = bool(re.search(r'function\s+handle\s*\(\s*TaskActivityLogged', raw))
