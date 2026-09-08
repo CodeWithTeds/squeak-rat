@@ -2,6 +2,12 @@
 /.rat.last.json
 /.rat.baseline.json
 /storage/rat/last.json
+/storage/rat/php_last.json
 /.rat/
 *.log
 __pycache__/
+.agents/
+skills-lock.json
+.coverage
+.pytest_cache/
+*.pyc

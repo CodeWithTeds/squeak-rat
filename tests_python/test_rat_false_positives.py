@@ -113,7 +113,8 @@ class TestRatSelfScanIsPureFalse(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("python_precise_scanner", str(ROOT / "python_precise_scanner.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        findings = mod.precise_scan(str(ROOT), exclude=["vendor","storage","bootstrap/cache","node_modules","public",".git"])
+        # Exclude tests_python/corpus which contains intentional vulnerable fixtures (not part of RAT self-scan)
+        findings = mod.precise_scan(str(ROOT), exclude=["vendor","storage","bootstrap/cache","node_modules","public",".git","tests_python","tests"])
         self.assertEqual(len(findings), 0, f"Precise scan should be 0 pure false, got {findings}")
         print(f"✅ Precise scanner 0 findings — pure false proven (vs PHP RAT {len(self.findings)})")
 

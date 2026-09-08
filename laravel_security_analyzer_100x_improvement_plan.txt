@@ -1,0 +1,300 @@
+100X IMPROVEMENT PLAN FOR THE LARAVEL SECURITY ANALYZER
+
+The main goal is to transform the analyzer from a regex-based pattern scanner into a Laravel-aware static security analysis engine.
+
+1. REPLACE REGEX-ONLY ANALYSIS WITH PHP AST PARSING
+Parse Laravel PHP source code into an Abstract Syntax Tree (AST). This allows the analyzer to understand classes, methods, functions, variables, method calls, expressions, controllers, models, and routes instead of relying mainly on text patterns.
+
+2. BUILD REAL TAINT ANALYSIS
+Track user-controlled data from sources such as request(), Request, route parameters, headers, cookies, uploaded files, and JSON input. Follow that data through assignments, arrays, function calls, services, repositories, and other application layers until it reaches dangerous sinks such as raw SQL, filesystem operations, shell commands, redirects, HTML output, or unsafe deserialization.
+
+3. MAKE THE ENGINE LARAVEL-AWARE
+Create a Laravel knowledge base containing:
+- Request/input sources
+- Dangerous sinks
+- Sanitizers and escaping functions
+- Validation mechanisms
+- Authentication middleware
+- Authorization middleware
+- Gates and Policies
+- Form Requests
+- Eloquent behavior
+- Blade escaping
+- Mass assignment
+- Common Laravel security APIs
+
+The analyzer should understand Laravel semantics instead of treating every matching function as automatically dangerous.
+
+4. ADD INTERPROCEDURAL ANALYSIS
+Do not stop data-flow analysis when user input enters another function. If a controller passes request data into a service and that service passes it into a repository or model, the analyzer should follow the complete path.
+
+Example:
+
+HTTP Request
+    -> Controller
+    -> Service
+    -> Repository
+    -> Database Query
+
+5. ANALYZE THE ENTIRE PROJECT
+Build a project index connecting:
+Routes -> Controllers -> Services -> Models -> Queries -> Views
+
+This allows vulnerabilities to be detected across multiple files instead of analyzing each file independently.
+
+6. BUILD CONTROL-FLOW AND DATA-FLOW GRAPHS
+Represent application behavior as graphs. The analyzer should understand where data originates, where it travels, what security controls affect it, and where it eventually ends up.
+
+This allows findings to contain actual evidence instead of simply saying that a regex matched.
+
+7. IMPROVE SANITIZATION AND VALIDATION AWARENESS
+Do not automatically consider validate(), validated(), only(), or similar methods to be universal sanitizers.
+
+The analyzer should determine:
+- What value was validated?
+- What validation rules were applied?
+- Where was the value used afterward?
+- Is that validation actually sufficient for the destination sink?
+- Was output escaped when necessary?
+- Was the query parameterized?
+
+Validation should be evaluated according to the vulnerability type.
+
+8. ADD LARAVEL-SPECIFIC SECURITY RULES
+Support detection for:
+- SQL injection
+- Cross-site scripting (XSS)
+- Command injection
+- Path traversal
+- Server-side request forgery (SSRF)
+- Unsafe file uploads
+- Mass assignment
+- Authorization bypass
+- Insecure direct object references (IDOR)
+- Open redirects
+- Insecure deserialization
+- Hardcoded secrets
+- Dangerous eval/shell execution
+- Security misconfiguration
+- Unsafe database operations
+- Missing or incorrect authorization controls
+
+9. IMPROVE FINDING EVIDENCE AND CONFIDENCE
+Instead of producing:
+
+SQL Injection detected
+
+produce a finding such as:
+
+HIGH - SQL Injection
+
+User-controlled data originates from Request::input() and reaches DB::raw() without parameterization.
+
+Flow:
+Request
+-> UserController::search()
+-> UserService::find()
+-> DB::raw()
+
+File:
+app/Services/UserService.php:42
+
+The analyzer should provide:
+- Severity
+- Confidence
+- Source
+- Sink
+- Data-flow path
+- File
+- Line number
+- Reason
+- Suggested remediation
+
+10. REDUCE FALSE POSITIVES AND FALSE NEGATIVES
+Avoid making security conclusions from a single textual pattern.
+
+For example:
+- A fillable role field is not automatically a mass-assignment vulnerability.
+- FormRequest authorize() returning true is not automatically a critical vulnerability.
+- Missing can: middleware does not automatically mean IDOR.
+- APP_DEBUG=true in a test/configuration file does not automatically mean production is vulnerable.
+- Missing lockForUpdate() does not automatically prove a race condition.
+
+The analyzer should correlate multiple pieces of evidence before assigning high or critical severity.
+
+11. CREATE A LARGE SECURITY TEST CORPUS
+Create many Laravel examples containing:
+- Confirmed vulnerabilities
+- Secure implementations
+- Edge cases
+- Framework-specific patterns
+- False-positive cases
+
+Then measure:
+- Precision
+- Recall
+- False-positive rate
+- False-negative rate
+
+Every change to the analyzer should run against this test corpus.
+
+12. IMPROVE RISK SCORING
+Severity should depend on evidence and exploitability rather than only pattern matches.
+
+Consider:
+- User-controlled source
+- Dangerous sink
+- Missing security control
+- Reachability
+- Authentication requirements
+- Authorization requirements
+- Data sensitivity
+- Exploitability
+- Confidence
+
+13. SEPARATE GENERIC ANALYSIS FROM PROJECT-SPECIFIC RULES
+The current analyzer contains several hard-coded project-specific checks such as specific models, routes, fields, and application concepts.
+
+Move these into configurable rules.
+
+Example:
+
+rules/
+    laravel/
+        sql_injection.py
+        xss.py
+        authorization.py
+        idor.py
+        file_upload.py
+    project/
+        custom_rules.py
+
+This makes the analyzer reusable across different Laravel projects.
+
+14. ADD A RULE ENGINE
+Instead of hard-coding every security check into one large analyzer file, create a rule interface.
+
+Each rule should define:
+- Rule ID
+- Name
+- Description
+- Severity
+- Sources
+- Sinks
+- Sanitizers
+- Detection logic
+- Confidence calculation
+- Remediation advice
+
+This makes the system easier to extend and maintain.
+
+15. ADD INCREMENTAL ANALYSIS
+Do not analyze the entire project from zero every time.
+
+Cache:
+- Parsed ASTs
+- Project index
+- Symbol information
+- Data-flow information
+
+When a developer changes one file, analyze only the affected parts.
+
+16. ADD CI/CD SUPPORT
+The analyzer should be usable in automated development pipelines.
+
+Example behavior:
+
+security-analyzer scan
+
+Exit codes:
+0 = no blocking findings
+1 = warnings
+2 = high/critical findings
+
+This allows it to run during GitHub Actions, GitLab CI, or other CI systems.
+
+17. ADD SARIF OUTPUT
+Support SARIF so findings can be integrated with security platforms and code-scanning systems.
+
+Example output fields:
+- Rule ID
+- Severity
+- Message
+- File
+- Line
+- Data-flow location
+- Remediation
+
+18. ADD MULTIPLE OUTPUT FORMATS
+Support:
+- Terminal output
+- JSON
+- SARIF
+- HTML
+- Markdown
+
+Terminal output should be concise, while HTML should provide complete evidence and data-flow visualization.
+
+19. ADD A SECURITY KNOWLEDGE BASE
+Maintain a structured database of:
+- Laravel APIs
+- Dangerous functions
+- Security-sensitive functions
+- Sanitizers
+- Validation patterns
+- Authorization patterns
+- Framework versions
+- Known insecure configurations
+
+This knowledge base can evolve independently from the analysis engine.
+
+20. TARGET ARCHITECTURE
+
+Laravel Project
+      |
+      v
+PHP Parser / AST
+      |
+      v
+Project Index
+      |
+      v
+Laravel Framework Knowledge Base
+      |
+      v
+Control-Flow Analysis
+      |
+      v
+Data-Flow Analysis
+      |
+      v
+Interprocedural Taint Engine
+      |
+      v
+Security Rules
+      |
+      v
+Finding Correlation
+      |
+      v
+Risk Scoring
+      |
+      v
+Security Report
+
+THE MOST IMPORTANT CHANGE
+
+The analyzer should stop asking:
+
+"Does this code match a suspicious pattern?"
+
+and instead ask:
+
+"Where did this data originate?
+How did it travel through the application?
+Was it validated or sanitized?
+Was authorization applied?
+Where did the data end up?
+Can that complete path actually create a vulnerability?"
+
+That change is the foundation for turning the current analyzer into a serious Laravel SAST/security-analysis tool.

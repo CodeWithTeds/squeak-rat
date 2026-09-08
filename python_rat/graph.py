@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-@dataclass
+@dataclass(slots=True)
 class Node:
     id: str
     type: str  # Route|Controller|Middleware|Service|Model|Job|Event|Listener|Observer|Database|External|Filesystem|Cache|Other
@@ -14,7 +14,7 @@ class Node:
     def to_dict(self):
         return {"id": self.id, "type": self.type, "name": self.name, "file": self.file, "line": self.line, "meta": self.meta}
 
-@dataclass
+@dataclass(slots=True)
 class Edge:
     frm: str
     to: str

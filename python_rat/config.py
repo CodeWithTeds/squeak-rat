@@ -1,7 +1,7 @@
 import re
 import pathlib
 
-DEFAULT_EXCLUDE = ["vendor","storage","bootstrap/cache","node_modules","public",".git",".idea",".vscode"]
+DEFAULT_EXCLUDE = ["vendor","storage","bootstrap/cache","node_modules","public",".git",".idea",".vscode","tests","tests_python",".rat"]
 DEFAULT_LARAVEL_LOT = ["app","routes","config","database","resources","Modules","modules","Domain","domain","Domains","src","packages","services","Services","apps","microservices","tests"]
 
 def load_config(project_root: pathlib.Path) -> dict:

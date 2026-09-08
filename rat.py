@@ -116,13 +116,28 @@ def handle_scan(args):
     project_root=pathlib.Path.cwd()
     cfg=load_config(project_root)
     cfg=resolve_scope(project_root, cfg, args)
+    # Handle exclude override
+    if getattr(args, "exclude", None):
+        cfg["exclude"] = [e.strip() for e in args.exclude.split(",") if e.strip()]
+    # Handle flush cache (incremental)
+    if getattr(args, "flush_cache", False):
+        try:
+            from python_rat.cache_manager import get_cache_manager
+            from python_rat.ast_parser import PhpAstParser
+            get_cache_manager(project_root).flush()
+            PhpAstParser(project_root).flush_cache()
+            print("  \033[90mCache flushed.\033[0m")
+        except Exception as e:
+            print(f"  \033[91mCache flush failed: {e}\033[0m")
 
     is_json=args.format in ("json","ndjson") or bool(getattr(args,"json",False))
+    # New formats per Plan #17, #18: sarif, html, markdown are also machine-readable
+    is_machine = args.format in ("json","ndjson","sarif","html","markdown") or bool(getattr(args,"json",False))
     no_image=bool(getattr(args,"no_image",False))
     compact=bool(getattr(args,"compact",False))
     ci=bool(getattr(args,"ci",False))
 
-    if not is_json:
+    if not is_machine:
         render_banner(with_image=not no_image, compact=compact)
         if getattr(args,"deep",False):
             print("  \033[38;2;139;92;246;1m🐀 RAT // DEEP SECURITY SCAN\033[0m")
@@ -140,20 +155,44 @@ def handle_scan(args):
     stats=result["stats"]
     graph=result["graph"]
 
-    if not is_json:
+    if not is_machine:
         render_stats(stats)
         render_findings_summary(findings)
-        print("  \033[90mFlags: --format=json | --format=ndjson | --ci | --fail-on=high | --no-image | --all | --path=app,routes\033[0m")
+        # Performance stats (Plan #15 incremental)
+        perf = stats.get("performance", {})
+        if perf:
+            print(f"  \033[90mPerformance: {perf.get('total_ms',0):.0f}ms | files {perf.get('files_ms',0):.0f}ms | flows {perf.get('flows_ms',0):.0f}ms | incremental hit {perf.get('incremental_hit_rate',0):.0%} | cache {stats.get('incremental',{}).get('cached_files',0)} files\033[0m")
+        print("  \033[90mFlags: --format=json | --format=sarif | --format=html | --format=markdown | --ci | --fail-on=high | --flush-cache\033[0m")
         print("  \033[90mScope: by default whole codebase (excl. vendor/storage/public/.git) — use --all or choose interactively\033[0m")
         print("  \033[90mUpdate: composer update squeak/rat --with-all-dependencies\033[0m")
         print()
 
-    # machine-readable
+    # machine-readable per Plan #17, #18
     if args.format=="json" or getattr(args,"json",False):
         print(json.dumps({"findings": findings, "stats": stats}, indent=2))
     elif args.format=="ndjson":
         for f in findings:
             print(json.dumps(f))
+    elif args.format=="sarif":
+        try:
+            from python_rat.reporters import to_sarif
+            print(json.dumps(to_sarif(findings), indent=2))
+        except Exception as e:
+            print(json.dumps({"error": str(e), "findings": findings}, indent=2))
+    elif args.format=="html":
+        try:
+            from python_rat.reporters import to_html
+            print(to_html(findings))
+        except Exception as e:
+            print(f"HTML error: {e}")
+            print(json.dumps({"findings": findings}, indent=2))
+    elif args.format=="markdown":
+        try:
+            from python_rat.reporters import to_markdown
+            print(to_markdown(findings))
+        except Exception as e:
+            print(f"Markdown error: {e}")
+            print(json.dumps({"findings": findings}, indent=2))
 
     if ci:
         fail_on=getattr(args,"fail_on",None) or cfg.get("fail_on","high")
@@ -333,9 +372,9 @@ def main():
 
     # default scan parser (also top-level options)
     def add_scan_opts(p):
-        p.add_argument("--format", default="table", choices=["table","json","ndjson"], help="Output format")
+        p.add_argument("--format", default="table", choices=["table","json","ndjson","sarif","html","markdown"], help="Output format (Plan #17, #18: SARIF/HTML/Markdown)")
         p.add_argument("--json", action="store_true", help="Alias for --format=json")
-        p.add_argument("--ci", action="store_true", help="CI mode")
+        p.add_argument("--ci", action="store_true", help="CI mode (Plan #16: exit 0/1/2)")
         p.add_argument("--fail-on", default=None, help="Override fail_on severity")
         p.add_argument("--no-image", action="store_true", help="Disable banner image")
         p.add_argument("--compact", action="store_true", help="Compact banner")
@@ -345,6 +384,7 @@ def main():
         p.add_argument("--deep", action="store_true", help="Deep security scan — Advanced data-flow + behavior")
         p.add_argument("--path", default=None, help="Comma-separated paths to scan (custom)")
         p.add_argument("--exclude", default=None, help="Comma-separated exclude patterns")
+        p.add_argument("--flush-cache", action="store_true", help="Flush incremental AST/cache (Plan #15)")
         return p
 
     # top-level scan options for `python3 rat.py` without subcommand

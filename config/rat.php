@@ -31,6 +31,9 @@ return [
         '.git',
         '.idea',
         '.vscode',
+        'tests',
+        'tests_python',
+        '.rat',
     ],
 
     'analysis' => [

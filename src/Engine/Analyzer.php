@@ -38,7 +38,7 @@ class Analyzer
         return [
             'fail_on' => 'high',
             'paths' => ['.'], // whole codebase by default — vendor/storage excluded below
-            'exclude' => ['vendor','storage','bootstrap/cache','node_modules','public','.git','.idea','.vscode'],
+            'exclude' => ['vendor','storage','bootstrap/cache','node_modules','public','.git','.idea','.vscode','tests','tests_python','.rat'],
             'analysis' => ['routes'=>true,'authorization'=>true,'data_flow'=>true,'hidden_behavior'=>true,'impact'=>true],
         ];
     }
@@ -608,20 +608,21 @@ class Analyzer
                     $findings[] = new Finding(id: 'RAT-TMP-AF02-ROUTE', title: 'POS void route missing authorization gate (only throttle)', description: 'PATCH pos/orders/{posOrder}/void has throttle only, no can: gate.', severity: Severity::HIGH, confidence: Confidence::HIGH, entry: $rel, source: 'Route pos/orders void', sink: 'missing can: middleware', flow: [$rel, 'void route', 'PosOrderService::void'], file: $rel, line: $line, recommendations: ["Add middleware can:update-operational-record", "Replace PIN with current_password"], category: 'authorization', why: sprintf('File %s:%d void route only throttle (rat-miss-finding.txt AF-02).', $rel, $line));
                 }
             }
-            if ((str_contains($rel, 'Services/') || str_contains($rel, 'Service')) && (str_contains($raw, 'ensureValidAdminPin') || stripos($raw, 'admin_pin') !== false) && preg_match('/hash_equals/i', $raw) && preg_match('/admin_pin/i', $raw) && !preg_match('/current_password|Hash::check.*admin_pin/i', $raw)) {
-                if (preg_match('/ensureValidAdminPin|admin_pin/i', $raw, $m, PREG_OFFSET_CAPTURE)) { $line = $this->lineForOffset($raw, $m[0][1]); $findings[] = new Finding(id: 'RAT-TMP-AF02-PIN', title: 'Weak shared POS_ADMIN_PIN cleartext', description: 'Shared PIN in env cleartext, not hashed.', severity: Severity::HIGH, confidence: Confidence::HIGH, entry: $rel, source: 'POS_ADMIN_PIN', sink: 'weak PIN check', flow: [$rel, 'POS_ADMIN_PIN', 'void'], file: $rel, line: $line, recommendations: ["Use current_password", "Or hash PIN"], category: 'security', why: sprintf('File %s:%d ensureValidAdminPin cleartext (AF-02).', $rel, $line)); }
+            // Generic weak PIN/OTP: any hash_equals with config/env pin/otp/secret/code without Hash::check
+            if (preg_match('/hash_equals/i', $raw) && preg_match('/pin|otp|secret|code/i', $raw) && preg_match('/config\(|env\(/i', $raw) && !preg_match('/current_password|Hash::check/i', $raw)) {
+                if (preg_match('/hash_equals/i', $raw, $m, PREG_OFFSET_CAPTURE)) { $line = $this->lineForOffset($raw, $m[0][1]); $findings[] = new Finding(id: 'RAT-TMP-PIN-WEAK', title: 'Weak PIN/OTP check with hash_equals and cleartext config', description: 'hash_equals on config/env pin/otp without hashing — brute force.', severity: Severity::HIGH, confidence: Confidence::HIGH, entry: $rel, source: 'hash_equals pin', sink: 'weak PIN check', flow: [$rel, 'hash_equals', 'pin'], file: $rel, line: $line, recommendations: ["Use current_password or Hash::check with hashed pin", "Throttle per user"], category: 'security', why: sprintf('File %s:%d hash_equals with cleartext pin/otp (generic, not just POS_ADMIN_PIN).', $rel, $line)); }
             }
-            // AF-03: receipt IDOR - only routes/web.php, per-line
-            if (str_ends_with($rel, 'routes/web.php') && str_contains($raw, 'purchase-orders') && str_contains($raw, 'receipt')) {
-                $hasReceiptWithoutCan = false; $receiptLine = 1;
+            // Generic sensitive file route without can: (receipt/invoice/pdf/download) - any routes/ file
+            if (str_contains($rel, 'routes/') && preg_match('/receipt|invoice|pdf|download/i', $raw)) {
+                $hasSensitiveWithoutCan = false; $sensitiveLine = 1; $sensitiveName = 'sensitive file';
                 foreach (explode("\n", $raw) as $idx => $lineContent) {
-                    if (preg_match('/Route\s*::\s*get.*purchase-orders.*receipt/i', $lineContent) && !str_contains($lineContent, 'can:')) {
-                        $hasReceiptWithoutCan = true; $receiptLine = $idx + 1; break;
+                    if (preg_match('/Route\s*::\s*get.*(receipt|invoice|pdf|download)/i', $lineContent, $mTmp) && !str_contains($lineContent, 'can:')) {
+                        $hasSensitiveWithoutCan = true; $sensitiveLine = $idx + 1; $sensitiveName = $mTmp[1] ?? 'sensitive file'; break;
                     }
                 }
-                if ($hasReceiptWithoutCan && preg_match('/can:update-operational-record/', $raw)) {
-                    $line = $receiptLine;
-                    $findings[] = new Finding(id: 'RAT-TMP-AF03', title: 'Purchase order receipt IDOR: GET receipt without can: gate', description: 'GET receipt lacks can: while PATCH status has it.', severity: Severity::MEDIUM, confidence: Confidence::HIGH, entry: $rel, source: 'Route receipt', sink: 'missing can: middleware', flow: [$rel, 'receipt route', 'Pdf::loadView'], file: $rel, line: $line, recommendations: ["Add middleware can:view-admin-only-page", "Add throttle"], category: 'authorization', why: sprintf('File %s:%d receipt without can: (AF-03).', $rel, $line));
+                if ($hasSensitiveWithoutCan && preg_match('/can:/', $raw)) {
+                    $line = $sensitiveLine;
+                    $findings[] = new Finding(id: 'RAT-TMP-SENSITIVE-FILE', title: 'Sensitive file route without can: gate ('.$sensitiveName.')', description: 'GET route with '.$sensitiveName.' lacks can: while other routes have it — IDOR.', severity: Severity::MEDIUM, confidence: Confidence::HIGH, entry: $rel, source: 'Route '.$sensitiveName, sink: 'missing can: middleware', flow: [$rel, $sensitiveName.' route', 'file download'], file: $rel, line: $line, recommendations: ["Add middleware can: gate", "Add throttle", "Use Policy"], category: 'authorization', why: sprintf('File %s:%d GET %s without can: (generic).', $rel, $line, $sensitiveName));
                 }
             }
             // AF-06: inconsistent operational auth - only routes/web.php

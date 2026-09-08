@@ -23,7 +23,7 @@ class FileDiscovery
     public function discover(ApplicationGraph $graph): array
     {
         $paths = $this->config['paths'] ?? ['.'];
-        $exclude = $this->config['exclude'] ?? ['vendor','storage','bootstrap/cache','node_modules','public','.git','.idea','.vscode'];
+        $exclude = $this->config['exclude'] ?? ['vendor','storage','bootstrap/cache','node_modules','public','.git','.idea','.vscode','tests','tests_python','.rat'];
 
         $allFiles = $this->collectPhpFiles($paths, $exclude);
 
