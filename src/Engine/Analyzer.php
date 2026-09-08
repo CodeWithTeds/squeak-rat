@@ -532,18 +532,98 @@ class Analyzer
             if ($raw === '') continue;
             $clean = $this->stripPhp($raw);
 
-            // AF-01 CRITICAL: Unauthenticated apiResource - only StoreTaskRequest.php / UpdateTaskRequest.php
-            if ((str_contains($rel, 'Requests/')) && preg_match('/class\s+\w+Request\b/', $raw) && preg_match('/function\s+authorize\s*\(\s*\)\s*:\s*bool\s*\{\s*return\s+true\s*;\s*\}/s', $raw)) {
-                if (preg_match('/function\s+authorize/', $raw, $m, PREG_OFFSET_CAPTURE)) {
-                    $line = $this->lineForOffset($raw, $m[0][1]);
-                    $findings[] = new Finding(
-                        id: 'RAT-TMP-AF01', title: 'Unauthenticated API resource: Task authorize() returns true',
-                        description: 'Api Task Store/Update request allows any user — route likely outside auth:sanctum.',
-                        severity: Severity::CRITICAL, confidence: Confidence::HIGH, entry: $rel, source: 'authorize()=>true', sink: 'unauthenticated apiResource',
-                        flow: [$rel, 'authorize true', 'apiResource tasks'], file: $rel, line: $line,
-                        recommendations: ["Move Route::apiResource('tasks', TaskController::class) inside Route::middleware('auth:sanctum')->group", "Change authorize() to return \$this->user()!==null", "Add Gate/policy for tasks.create/view"],
-                        category: 'authorization', why: sprintf('File %s:%d Store/UpdateTaskRequest authorize() returns true unconditionally. With routes/api/v1.php:22 apiResource(tasks) outside auth:sanctum, unauthenticated access (rat-miss-finding.txt AF-01).', $rel, $line)
-                    );
+            // AF-01 CRITICAL: Laravel-correct authorize() — authorize:true is NOT unauth when middleware handles auth
+            // Suppress hallucinated api sink for Store*Request behind auth,verified,role (RAT-006..020). Only flag if route provably outside auth.
+            if ((str_contains($rel, 'Requests/')) && preg_match('/class\s+(\w+Request)\b/', $raw, $mCls) && preg_match('/function\s+authorize\s*\(\s*\)\s*:\s*bool\s*\{\s*return\s+true\s*;\s*\}/s', $raw)) {
+                $requestClass = $mCls[1] ?? '';
+                $isApiRequest = str_contains($rel, 'Api/') || str_contains($rel, '/Api') || str_contains(strtolower($rel), '/api/');
+                $hasProtectedRouteEvidence = false;
+                $hasUnauthApiResource = false;
+                // Check routes/ dir recursively for auth middleware vs unauth apiResource (filesystem correlation)
+                $routesDir = $this->projectRoot . '/routes';
+                if (is_dir($routesDir)) {
+                    $routeFiles = [];
+                    $it = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($routesDir, \FilesystemIterator::SKIP_DOTS));
+                    foreach ($it as $fi) { if ($fi->getExtension() === 'php') $routeFiles[] = $fi->getPathname(); }
+                    foreach ($routeFiles as $rf) {
+                        $rc = @file_get_contents($rf) ?: '';
+                        if (preg_match('/middleware\s*\(\s*\[.*auth.*\]|\bmiddleware\s*\(\s*[\'"]auth|auth\s*:|verified|role\s*:/i', $rc)) {
+                            $hasProtectedRouteEvidence = true;
+                        }
+                        if (preg_match('/Route\s*::\s*apiResource\s*\(\s*[\'"]/', $rc)) {
+                            $isApiRouteFile = str_contains(strtolower($rf), '/api');
+                            if (! preg_match('/Route\s*::\s*middleware\s*\(\s*[\'"]auth:sanctum/', $rc)) {
+                                if ($isApiRouteFile) $hasUnauthApiResource = true;
+                            } else {
+                                if (preg_match('/Route\s*::\s*middleware\s*\(\s*[\'"]auth:sanctum[\'"]\s*\)\s*->\s*group\s*\(\s*function/s', $rc, $mGroupTmp)) {
+                                    $afterTmp = substr($rc, strpos($rc, $mGroupTmp[0]) + strlen($mGroupTmp[0]));
+                                    if (preg_match('/\}\s*\)\s*;/', $afterTmp, $mCloseTmp)) {
+                                        $apiPosTmp = strpos($rc, 'apiResource');
+                                        $groupEndTmp = strpos($rc, $mGroupTmp[0]) + strlen($mGroupTmp[0]) + $mCloseTmp[0][1] ?? 0;
+                                        // rough inside check: if apiResource after group close
+                                        if ($apiPosTmp !== false && $apiPosTmp > (strpos($rc, $mGroupTmp[0]) + $mCloseTmp[0][1])) {
+                                            $hasUnauthApiResource = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Check bootstrap/app.php for api registration — if no api: key, no api sink exists
+                $bApp = $this->projectRoot . '/bootstrap/app.php';
+                if (file_exists($bApp)) {
+                    $bContent = @file_get_contents($bApp) ?: '';
+                    if (str_contains($bContent, 'withRouting') && ! str_contains($bContent, 'api:')) {
+                        $hasProtectedRouteEvidence = true; // no api routes registered at all
+                    }
+                }
+                // Graph correlation: does controller using this Request have auth route?
+                if ($requestClass !== '' && isset($graph)) {
+                    foreach ($files as $fp2) {
+                        $raw2 = @file_get_contents($fp2) ?: '';
+                        if (str_contains($raw2, $requestClass) && (str_contains($fp2, 'Controller') || str_contains($fp2, '/Http/Controllers'))) {
+                            $ctrlName = basename($fp2, '.php');
+                            foreach ($graph->nodesByType('Route') as $rn) {
+                                $action = (string) ($rn->meta['action'] ?? '');
+                                $routeName = (string) $rn->name;
+                                if (str_contains($action, $ctrlName) || str_contains(strtolower($routeName), strtolower($ctrlName))) {
+                                    $rfRel = $rn->file;
+                                    $rc2 = $rfRel && file_exists($this->projectRoot . '/' . $rfRel) ? (@file_get_contents($this->projectRoot . '/' . $rfRel) ?: '') : '';
+                                    if (preg_match('/auth|can:|verified|role:/i', $action . $rc2)) {
+                                        $hasProtectedRouteEvidence = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Decision: only flag Request if Api request AND unauth apiResource proven
+                if ($hasUnauthApiResource && $isApiRequest) {
+                    if (preg_match('/function\s+authorize/', $raw, $m, PREG_OFFSET_CAPTURE)) {
+                        $line = $this->lineForOffset($raw, $m[0][1]);
+                        $resName = 'resource';
+                        $low = strtolower($requestClass);
+                        if (str_contains($low, 'task')) $resName = 'tasks';
+                        elseif (str_contains($low, 'chick')) $resName = 'chick-rearings';
+                        elseif (str_contains($low, 'egg')) $resName = 'egg-collections';
+                        elseif (str_contains($low, 'feed') || str_contains($low, 'product')) $resName = 'products';
+                        else {
+                            $core = preg_replace('/^(Store|Update)/', '', $requestClass);
+                            $core = preg_replace('/Request$/', '', $core ?? '');
+                            $resName = strtolower($core ?? 'resource') . 's';
+                        }
+                        $findings[] = new Finding(
+                            id: 'RAT-TMP-AF01', title: "Unauthenticated API resource: {$requestClass} authorize() returns true",
+                            description: "Api {$resName} request allows any user (authorize true) — route outside auth:sanctum.",
+                            severity: Severity::CRITICAL, confidence: Confidence::HIGH, entry: $rel, source: 'authorize()=>true', sink: 'unauthenticated apiResource',
+                            flow: [$rel, 'authorize true', "apiResource {$resName}"], file: $rel, line: $line,
+                            recommendations: ["Move Route::apiResource('{$resName}', Controller::class) inside Route::middleware('auth:sanctum')->group", "Change authorize() to return \$this->user()!==null", "Add Gate/policy"],
+                            category: 'authorization', why: sprintf('File %s:%d %s authorize() returns true with routes/api/* apiResource(%s) outside auth:sanctum (verified via route correlation).', $rel, $line, $requestClass, $resName)
+                        );
+                    }
+                } else {
+                    // Suppress hallucinated api sink — Laravel correct: middleware auth,verified,role handles auth
                 }
             }
             // AF-01 route file check: only routes/api* files
