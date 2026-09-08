@@ -201,6 +201,20 @@ class Analyzer:
         findings = self._correlate_and_score(findings, graph, project_index)
         perf["correlation_ms"] = (time.perf_counter() - t_corr) * 1000
 
+        # LLM false-positive reduction (oprouter / OpenRouterClient).
+        # Runs after correlation, before ID assignment. Disabled unless
+        # llm.enabled and OPENROUTER_API_KEY present; fail-safe otherwise.
+        llm_cfg = self.config.get("llm") or {}
+        if llm_cfg.get("enabled"):
+            try:
+                from .llm_filter import filter_findings
+
+                t_llm = time.perf_counter()
+                findings = filter_findings(self.project_root, self.config, findings, model="")
+                perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
+            except Exception as e:
+                perf["llm_error"] = str(e)[:100]
+
         findings=self._assign_ids(findings)
         # sort by severity weight desc + risk score
         findings.sort(key=lambda f: (SEVERITY_WEIGHT.get(f["severity"],0), f.get("risk_score",0)), reverse=True)
