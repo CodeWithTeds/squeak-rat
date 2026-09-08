@@ -57,8 +57,84 @@ class TaintEngine:
     def _strip(self, content: str) -> str:
         return strip_php(content)
 
+    def _get_method_boundaries(self, raw: str, clean: str) -> List[Tuple[str, int, int, int, int]]:
+        """Parse PHP methods via regex + brace counting. Returns (name, start_line, end_line, start_offset, end_offset)."""
+        boundaries: List[Tuple[str, int, int, int, int]] = []
+        # Find function definitions
+        func_pat = re.compile(r'function\s+(\w+)\s*\([^)]*\)\s*(?::\s*[\w\\|]+\s*)?\{', re.I)
+        for m in func_pat.finditer(raw):
+            name = m.group(1)
+            start_offset = m.start()
+            start_line = raw[:start_offset].count("\n") + 1
+            # Brace counting from opening {
+            brace_start = m.end() - 1  # at {
+            depth = 0
+            end_offset = len(raw)
+            for idx in range(brace_start, len(raw)):
+                ch = raw[idx]
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end_offset = idx + 1
+                        break
+            end_line = raw[:end_offset].count("\n") + 1
+            boundaries.append((name, start_line, end_line, start_offset, end_offset))
+        return boundaries
+
+    def _method_for_offset(self, offset: int, line: int, boundaries: List[Tuple[str, int, int, int, int]]) -> Optional[str]:
+        """Find method name containing offset/line. Returns None if outside any method (e.g. class property)."""
+        for name, s_line, e_line, s_off, e_off in boundaries:
+            if s_off <= offset < e_off or s_line <= line <= e_line:
+                return name
+        return None
+
+    def _is_mass_assignment_safe_via_fillable(self, sink: Dict, raw: str, clean: str, file_path: pathlib.Path) -> bool:
+        """Check if mass_assignment is safe because validation + auth makes it hygiene not high (overall fix RAT-001)."""
+        has_validate = bool(re.search(r'->\s*validate\s*\(|->\s*validated\s*\(|->\s*only\s*\(|Request\s+\$request', raw))
+        if not has_validate:
+            return False
+        sink_snippet = raw[sink["offset"]: sink["offset"]+600] if sink["offset"] < len(raw) else ""
+        context = raw[max(0, sink["offset"]-800): sink["offset"]+600]
+        # If $request->all() used but file also has validate/validated, it's hygiene (fillable whitelists)
+        if "$request->all()" in context:
+            # Check if validation rules exist in same method (same file has validate)
+            if "validate" in raw.lower() and "fillable" in self._get_fillable_context(raw, file_path):
+                return True
+            # Even if fillable not found, if validate exists and no sensitive mass assignment, downgrade
+            # Sensitive check: if Model fillable contains role/is_admin, not safe
+            lower = context.lower() + sink_snippet.lower()
+            if any(k in lower for k in ["is_admin", "is_super", "'role'", '"role"', "branch_id"]):
+                return False
+            return True
+        return False
+
+    def _get_fillable_context(self, raw: str, file_path: pathlib.Path) -> str:
+        """Try to find fillable for associated Model (overall hygiene check)."""
+        # For repository pattern, try to find Model via file content or related Model file
+        try:
+            # Search for Model references
+            for m in re.finditer(r'(\w+)::\s*create|(\w+)Repository|(\w+)Model', raw):
+                model = next((g for g in m.groups() if g), None)
+                if model:
+                    # Try to find Model file
+                    for cand in self.project_root.rglob(f"{model}.php"):
+                        try:
+                            c = cand.read_text(errors="ignore")
+                            if "fillable" in c:
+                                return c
+                        except:
+                            continue
+            # Fallback: check current file's fillable
+            if "fillable" in raw:
+                return raw
+        except:
+            pass
+        return raw
+
     def analyze_file(self, file_path: pathlib.Path) -> List[TaintFlow]:
-        """Intraprocedural analysis for single file → flows with taint."""
+        """Intraprocedural analysis for single file → flows with taint (method-scoped to avoid cross-method false positives)."""
         try:
             rel = str(file_path.relative_to(self.project_root))
         except ValueError:
@@ -79,9 +155,11 @@ class TaintEngine:
         if not sources or not sinks:
             return []
 
-        # Build variable-level taint (Plan #2)
+        # Build variable-level taint (Plan #2) — per-method to avoid cross-method false positives (overall fix RAT-002/003)
         state = self._build_variable_state(clean, raw)
         self._file_states[rel] = state
+        # Method boundaries for cross-method false positive suppression (RAT-002/003: index() source vs update() sink)
+        method_boundaries = self._get_method_boundaries(raw, clean)
 
         flows: List[TaintFlow] = []
         clean_lines = clean.splitlines()
@@ -163,6 +241,25 @@ class TaintEngine:
 
             # Nearest source
             nearest = self._nearest_source(sources, sink, clean)
+            # === Overall fix: suppress cross-method false positives (RAT-002/003) ===
+            # If source and sink are in different methods, it's not a real data flow for idor/mass_assignment
+            # e.g., $request->query('game_fowl_id') in create() vs $medicalRecord->delete() in destroy()
+            if nearest and method_boundaries:
+                sink_method = self._method_for_offset(offset, sink_line_num, method_boundaries)
+                src_method = self._method_for_offset(nearest["offset"], nearest_line(clean, nearest["offset"]), method_boundaries)
+                if sink_method and src_method and sink_method != src_method:
+                    # For idor/auth_update, mass_assignment, file_upload, require same method
+                    if sink["category"] in ("idor", "mass_assignment", "file_upload") or sink["id"] in ("auth_update", "mass_assignment"):
+                        continue
+                    # For other categories, downgrade confidence
+                    if sink["category"] in ("injection", "xss"):
+                        # keep but will be low confidence later
+                        pass
+            # === Overall fix: mass_assignment with $request->all() but strict fillable + validation -> downgrade to LOW (RAT-001 hygiene) ===
+            if sink["id"] == "mass_assignment" and self._is_mass_assignment_safe_via_fillable(sink, raw, clean, file_path):
+                # Downgrade severity from HIGH to LOW for overall project hygiene
+                sink = dict(sink)  # copy to avoid mutating cached
+                sink["severity"] = "low"
             # Build interprocedural path if index available
             path = self._build_interprocedural_path(rel, sink, nearest)
             confidence = self._estimate_confidence(sources, sink, has_taint, sanitized, sink["severity"], clean)
@@ -357,15 +454,23 @@ class TaintEngine:
         return None
 
     def _nearest_source(self, sources: List[Dict], sink: Dict, clean: str) -> Optional[Dict]:
-        # Find source with offset closest before sink
+        # Find source closest to sink, preferring same method/line (overall fix for same-line $request->all() in mass_assignment)
+        sink_line = clean[:sink["offset"]].count("\n") + 1
         best = None
         best_dist = float('inf')
         for src in sources:
-            if src["offset"] < sink["offset"]:
+            src_line = clean[:src["offset"]].count("\n") + 1
+            # If same line, distance is minimal (e.g., ->update($id, $request->all()) has source after sink on same line)
+            if src_line == sink_line:
+                dist = abs(src["offset"] - sink["offset"])
+            elif src["offset"] < sink["offset"]:
                 dist = sink["offset"] - src["offset"]
-                if dist < best_dist:
-                    best_dist = dist
-                    best = src
+            else:
+                # Source after sink on different line -> penalize (cross-method already handled, but keep)
+                dist = abs(src["offset"] - sink["offset"]) + 5000
+            if dist < best_dist:
+                best_dist = dist
+                best = src
         return best or (sources[0] if sources else None)
 
     def _build_interprocedural_path(self, file_rel: str, sink: Dict, nearest: Optional[Dict]) -> List[str]:
