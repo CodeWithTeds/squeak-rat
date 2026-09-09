@@ -34,7 +34,36 @@ def load_config(project_root: pathlib.Path) -> dict:
         # maybe env('RAT_FAIL_ON', 'high')
         mm=re.search(r"env\s*\(\s*['\"]RAT_FAIL_ON['\"]\s*,\s*['\"]([^'\"]+)['\"]", text)
         if mm: fail_on=mm.group(1)
-    return {"fail_on":fail_on,"paths":paths,"exclude":exclude,"analysis":{"routes":True,"authorization":True,"data_flow":True,"hidden_behavior":True,"impact":True},"baseline":str(project_root/".rat.baseline.json")}
+    # llm section (Plan: LLM false-positive reduction via oprouter)
+    llm={}
+    m=re.search(r"'llm'\s*=>\s*\[(.*?)\]\s*,?\s*\)", text, re.S)
+    if not m:
+        m=re.search(r"['\"]llm['\"]\s*=>\s*\[(.*?)\]", text, re.S)
+    if m:
+        block=m.group(1)
+        # enabled
+        em=re.search(r"['\"]enabled['\"]\s*=>\s*(env\s*\(\s*['\"]RAT_LLM['\"]\s*,\s*(true|false)|true|false)", block)
+        if em:
+            ev=em.group(1).lower()
+            llm["enabled"]= ("true" in ev) or ("env" in ev and "true" in ev)
+        # model
+        mm=re.search(r"['\"]model['\"]\s*=>\s*['\"]([^'\"]+)['\"]", block)
+        if mm: llm["model"]=mm.group(1)
+        # min_confidence
+        cm=re.search(r"['\"]min_confidence['\"]\s*=>\s*['\"]([^'\"]+)['\"]", block)
+        if cm: llm["min_confidence"]=cm.group(1)
+        # drop_false
+        dm=re.search(r"['\"]drop_false['\"]\s*=>\s*(true|false)", block)
+        if dm: llm["drop_false"]= dm.group(1).lower()=="true"
+        # api_key (optional; else env OPENROUTER_API_KEY)
+        km=re.search(r"['\"]api_key['\"]\s*=>\s*['\"]([^'\"]+)['\"]", block)
+        if km: llm["api_key"]=km.group(1)
+        # endpoint (optional; default OpenRouter chat completions URL)
+        em2=re.search(r"['\"]endpoint['\"]\s*=>\s*['\"]([^'\"]+)['\"]", block)
+        if em2: llm["endpoint"]=em2.group(1)
+    cfg={"fail_on":fail_on,"paths":paths,"exclude":exclude,"analysis":{"routes":True,"authorization":True,"data_flow":True,"hidden_behavior":True,"impact":True},"baseline":str(project_root/".rat.baseline.json")}
+    if llm: cfg["llm"]=llm
+    return cfg
 
 def resolve_scope(project_root: pathlib.Path, cfg: dict, args) -> dict:
     """

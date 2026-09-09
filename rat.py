@@ -116,6 +116,15 @@ def handle_scan(args):
     project_root=pathlib.Path.cwd()
     cfg=load_config(project_root)
     cfg=resolve_scope(project_root, cfg, args)
+    # LLM false-positive reduction flags (Plan: oprouter OpenRouterClient)
+    llm_enabled = bool(getattr(args, "llm", False))
+    llm_model = getattr(args, "llm_model", None)
+    if llm_enabled or llm_model:
+        llm = cfg.setdefault("llm", {})
+        if llm_enabled:
+            llm["enabled"] = True
+        if llm_model:
+            llm["model"] = llm_model
     # Handle exclude override
     if getattr(args, "exclude", None):
         cfg["exclude"] = [e.strip() for e in args.exclude.split(",") if e.strip()]
@@ -132,7 +141,7 @@ def handle_scan(args):
 
     is_json=args.format in ("json","ndjson") or bool(getattr(args,"json",False))
     # New formats per Plan #17, #18: sarif, html, markdown are also machine-readable
-    is_machine = args.format in ("json","ndjson","sarif","html","markdown") or bool(getattr(args,"json",False))
+    is_machine = args.format in ("json","ndjson","sarif","html","markdown","pdf") or bool(getattr(args,"json",False))
     no_image=bool(getattr(args,"no_image",False))
     compact=bool(getattr(args,"compact",False))
     ci=bool(getattr(args,"ci",False))
@@ -162,7 +171,7 @@ def handle_scan(args):
         perf = stats.get("performance", {})
         if perf:
             print(f"  \033[90mPerformance: {perf.get('total_ms',0):.0f}ms | files {perf.get('files_ms',0):.0f}ms | flows {perf.get('flows_ms',0):.0f}ms | incremental hit {perf.get('incremental_hit_rate',0):.0%} | cache {stats.get('incremental',{}).get('cached_files',0)} files\033[0m")
-        print("  \033[90mFlags: --format=json | --format=sarif | --format=html | --format=markdown | --ci | --fail-on=high | --flush-cache\033[0m")
+        print("  \033[90mFlags: --format=json | --format=sarif | --format=html | --format=markdown | --format=pdf --out=report.pdf | --ci | --fail-on=high | --flush-cache\033[0m")
         print("  \033[90mScope: by default whole codebase (excl. vendor/storage/public/.git) — use --all or choose interactively\033[0m")
         print("  \033[90mUpdate: composer update squeak/rat --with-all-dependencies\033[0m")
         print()
@@ -193,6 +202,14 @@ def handle_scan(args):
         except Exception as e:
             print(f"Markdown error: {e}")
             print(json.dumps({"findings": findings}, indent=2))
+    elif args.format=="pdf":
+        try:
+            from python_rat.reporters import write_pdf
+            out = pathlib.Path(getattr(args, "out", "") or "rat-report.pdf")
+            p = write_pdf(findings, out, stats)
+            print(f"  \033[92m✓ PDF report written to\033[0m {p.resolve()}")
+        except Exception as e:
+            print(f"PDF error: {e}")
 
     if ci:
         fail_on=getattr(args,"fail_on",None) or cfg.get("fail_on","high")
@@ -372,7 +389,7 @@ def main():
 
     # default scan parser (also top-level options)
     def add_scan_opts(p):
-        p.add_argument("--format", default="table", choices=["table","json","ndjson","sarif","html","markdown"], help="Output format (Plan #17, #18: SARIF/HTML/Markdown)")
+        p.add_argument("--format", default="table", choices=["table","json","ndjson","sarif","html","markdown","pdf"], help="Output format (Plan #17, #18: SARIF/HTML/Markdown; PDF for reports)")
         p.add_argument("--json", action="store_true", help="Alias for --format=json")
         p.add_argument("--ci", action="store_true", help="CI mode (Plan #16: exit 0/1/2)")
         p.add_argument("--fail-on", default=None, help="Override fail_on severity")
@@ -383,7 +400,10 @@ def main():
         p.add_argument("--security", action="store_true", help="Security scan — Vulnerability & attack-surface")
         p.add_argument("--deep", action="store_true", help="Deep security scan — Advanced data-flow + behavior")
         p.add_argument("--path", default=None, help="Comma-separated paths to scan (custom)")
+        p.add_argument("--out", default=None, help="Output file path for --format=pdf (default: rat-report.pdf)")
         p.add_argument("--exclude", default=None, help="Comma-separated exclude patterns")
+        p.add_argument("--llm", action="store_true", help="Enable LLM false-positive reduction (OpenRouter via oprouter)")
+        p.add_argument("--llm-model", default=None, help="OpenRouter model for FP reduction (e.g. google/gemini-2.5-flash)")
         p.add_argument("--flush-cache", action="store_true", help="Flush incremental AST/cache (Plan #15)")
         return p
 
