@@ -599,9 +599,12 @@ class Analyzer
 
             // AF-01 CRITICAL: Laravel-correct authorize() — authorize:true is NOT unauth when middleware handles auth
             // Suppress hallucinated api sink for Store*Request behind auth,verified,role (RAT-006..020). Only flag if route provably outside auth.
+            // RAT-004: login/register/password-reset FormRequests are intentionally public, so authorize:true is correct there.
             if ((str_contains($rel, 'Requests/')) && preg_match('/class\s+(\w+Request)\b/', $raw, $mCls) && preg_match('/function\s+authorize\s*\(\s*\)\s*:\s*bool\s*\{\s*return\s+true\s*;\s*\}/s', $raw)) {
                 $requestClass = $mCls[1] ?? '';
                 $isApiRequest = str_contains($rel, 'Api/') || str_contains($rel, '/Api') || str_contains(strtolower($rel), '/api/');
+                $isAuthRequest = (bool) preg_match('/(Login|Register|ForgotPassword|PasswordReset|ResetPassword|NewPassword|VerifyEmail|EmailVerification|ConfirmPassword|TwoFactor|Authentication)Request$/', $requestClass)
+                    || (bool) preg_match('#/Auth(?:entication)?/#', $rel);
                 $hasProtectedRouteEvidence = false;
                 $hasUnauthApiResource = false;
                 // Check routes/ dir recursively for auth middleware vs unauth apiResource (filesystem correlation)
@@ -663,8 +666,11 @@ class Analyzer
                         }
                     }
                 }
-                // Decision: only flag Request if Api request AND unauth apiResource proven
-                if ($hasUnauthApiResource && $isApiRequest) {
+                // Decision: only flag Request if Api request AND unauth apiResource proven.
+                // RAT-004: auth-flow FormRequests are public by design -> never flag.
+                if ($isAuthRequest) {
+                    // public authentication endpoint — authorize():true intentional
+                } elseif ($hasUnauthApiResource && $isApiRequest) {
                     if (preg_match('/function\s+authorize/', $raw, $m, PREG_OFFSET_CAPTURE)) {
                         $line = $this->lineForOffset($raw, $m[0][1]);
                         $resName = 'resource';

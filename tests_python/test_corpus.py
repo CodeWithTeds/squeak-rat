@@ -91,6 +91,42 @@ class TestCorpus(unittest.TestCase):
         # F1 should be >0.6
         self.assertGreaterEqual(f1, 0.6, f"F1 {f1:.0%} too low")
 
+    def test_auth_request_authorize_true_not_flagged(self):
+        """RAT-004: login FormRequest authorize():true must NOT be flagged as unauth API resource,
+        while a genuine non-auth Store*Request behind an unauth apiResource still is."""
+        import tempfile, pathlib as pl
+        with tempfile.TemporaryDirectory() as td:
+            root = pl.Path(td)
+            (root / "app" / "Http" / "Requests" / "Api" / "Auth").mkdir(parents=True)
+            (root / "routes").mkdir(parents=True)
+            (root / "routes" / "api.php").write_text("""<?php
+use Illuminate\\Support\\Facades\\Route;
+use App\\Http\\Controllers\\TaskController;
+Route::apiResource('tasks', TaskController::class);
+""")
+            (root / "app" / "Http" / "Requests" / "Api" / "Auth" / "LoginRequest.php").write_text("""<?php
+namespace App\\Http\\Requests\\Api\\Auth;
+use Illuminate\\Foundation\\Http\\FormRequest;
+class LoginRequest extends FormRequest {
+    public function authorize(): bool { return true; }
+    public function rules(): array { return ['email' => ['required','email'], 'password' => ['required','min:6']]; }
+}""")
+            (root / "app" / "Http" / "Requests" / "Api" / "StoreTaskRequest.php").write_text("""<?php
+namespace App\\Http\\Requests\\Api;
+use Illuminate\\Foundation\\Http\\FormRequest;
+class StoreTaskRequest extends FormRequest {
+    public function authorize(): bool { return true; }
+    public function rules(): array { return ['title' => ['required','string']]; }
+}""")
+            cfg = {"paths": [str(root)], "exclude": [], "analysis": {"routes": True, "authorization": True, "data_flow": True, "hidden_behavior": False, "impact": False, "security": True, "deep": True}, "performance": {"use_ast": False, "taint_v2": False, "incremental": False}}
+            findings = Analyzer(root, cfg).analyze()["findings"]
+            flagged = [f["file"] for f in findings]
+            self.assertFalse(any("LoginRequest" in f for f in flagged),
+                             f"LoginRequest (public auth endpoint) must not be flagged: {findings}")
+            self.assertTrue(any("StoreTaskRequest" in f for f in flagged),
+                            f"Non-auth StoreTaskRequest behind unauth apiResource should still be flagged: {findings}")
+            print("✅ RAT-004 suppressed: LoginRequest not flagged; StoreTaskRequest still flagged")
+
     def test_interprocedural_detection(self):
         """Test that taint follows across files (Controller->Service->Repository)."""
         import tempfile, pathlib as pl

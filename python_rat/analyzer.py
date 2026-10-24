@@ -1083,10 +1083,18 @@ class Analyzer:
             # It does NOT mean unauthenticated. Only flag when route is provably outside auth.
             # Fixes RAT-006..020 false positives where RAT hallucinated apiResource('tasks')
             # for every Store*Request even though routes are protected web routes.
+            # Fixes RAT-004 false positive: login/register/password-reset FormRequests are
+            # intentionally reachable before authentication, so authorize():true is correct
+            # and must never be reported as an unauthenticated API resource.
             if 'Requests/' in rel and re.search(r'class\s+\w+Request\b', raw) and re.search(r'function\s+authorize\s*\(\s*\)\s*:\s*bool\s*\{\s*return\s+true\s*;\s*\}', raw, re.S):
                 m_class = re.search(r'class\s+(\w+Request)\b', raw)
                 request_class = m_class.group(1) if m_class else ""
                 is_api_request = 'Api/' in rel or '/Api' in rel or rel.lower().count('/api/') > 0
+                # Auth-flow requests are public by design (pre-authentication endpoints).
+                is_auth_request = bool(re.search(
+                    r'(Login|Register|ForgotPassword|PasswordReset|ResetPassword|NewPassword|'
+                    r'VerifyEmail|EmailVerification|ConfirmPassword|TwoFactor|Authentication)Request$',
+                    request_class)) or bool(re.search(r'/Auth(?:entication)?/', rel))
                 # Pre-scan route files for auth evidence vs unauth apiResource
                 has_protected_route_evidence = False
                 has_unauth_api_resource = False
@@ -1165,8 +1173,11 @@ class Analyzer:
                 # Decision per Laravel docs: suppress if protected evidence dominates and no unauth apiResource
                 # True AF-01: is_api_request && has_unauth_api_resource -> flag CRITICAL
                 # False positive (user report): StoreChickRearingRequest etc. behind auth,verified,role:staff -> suppress
+                # False positive (RAT-004): auth/login FormRequest (authorize true) is public by design -> suppress
                 # If we cannot prove unauth exposure, DO NOT hallucinate api sink.
-                if has_unauth_api_resource and is_api_request:
+                if is_auth_request:
+                    pass  # public authentication endpoint — authorize():true intentional (RAT-004)
+                elif has_unauth_api_resource and is_api_request:
                     m = re.search(r'function\s+authorize', raw)
                     line_no = raw[:m.start()].count("\n")+1 if m else 1
                     # Derive resource name from Request (e.g., StoreTaskRequest -> tasks) for accurate title, not always Task
