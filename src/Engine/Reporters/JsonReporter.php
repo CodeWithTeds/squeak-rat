@@ -10,7 +10,7 @@ class JsonReporter implements Reporter
     {
         $payload = [
             'tool' => 'RAT',
-            'version' => '1.0.0',
+            'version' => '1.3.0',
             'tagline' => 'RAT follows the trail.',
             'stats' => $stats,
             'findings' => array_map(fn(Finding $f) => $f->toArray(), $findings),

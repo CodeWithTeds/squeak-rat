@@ -714,7 +714,7 @@ PHP
     }
 }
 
-$app = new Application('RAT', '1.0.0');
+$app = new Application('RAT', '1.3.0');
 $app->setCatchExceptions(true);
 
 // Main rat command as default when no subcommand given

@@ -18,7 +18,7 @@ from typing import List, Dict, Any
 from dataclasses import dataclass
 
 # ── SARIF Reporter (Plan #17) ──
-def to_sarif(findings: List[Dict], tool_name: str = "squeak/rat", version: str = "1.1") -> Dict:
+def to_sarif(findings: List[Dict], tool_name: str = "squeak/rat", version: str = "1.3.0") -> Dict:
     """
     Generate SARIF 2.1.0 output for GitHub Advanced Security / CodeQL integration.
     Fields: Rule ID, Severity, Message, File, Line, Data-flow location, Remediation

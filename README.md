@@ -21,7 +21,7 @@
 
 [![PHP ^8.1|^8.2|^8.3|^8.4](https://img.shields.io/badge/PHP-^8.1%7C8.2%7C8.3%7C8.4-7c3aed?style=for-the-badge&logo=php&logoColor=white)](https://php.net)
 [![Laravel 9|10|11|12](https://img.shields.io/badge/Laravel-9%20%7C%2010%20%7C%2011%20%7C%2012-8b5cf6?style=for-the-badge&logo=laravel&logoColor=white)](https://laravel.com)
-[![squeak/rat v1.0.0](https://img.shields.io/badge/squeak%2Frat-v1.0.0-7c3aed?style=for-the-badge)](https://github.com/squeak/rat)
+[![squeak/rat v1.3.0](https://img.shields.io/badge/squeak%2Frat-v1.3.0-7c3aed?style=for-the-badge)](https://github.com/squeak/rat)
 [![Tests](https://img.shields.io/badge/tests-passing-22c55e?style=for-the-badge)](tests)
 [![License MIT](https://img.shields.io/badge/license-MIT-a78bfa?style=for-the-badge)](LICENSE)
 [![Violet 2026](https://img.shields.io/badge/Terminal-Violet_2026-7c3aed?style=for-the-badge)](#)
